@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -293,6 +294,27 @@ int main(int argc, char **argv) {
 	for (i = 0; i < nrule; i++)
 		add_path(ruleset, rule[i].path, rule[i].rights & mask);
 
+	/*
+	 * no_new_privs MUST be set before landlock_restrict_self, which
+	 * otherwise fails with EPERM (unless we have CAP_SYS_ADMIN, which we
+	 * deliberately do not). The reason: without it a sandboxed process
+	 * could exec a setuid-root binary and have the kernel hand it
+	 * privileges it could use to look outside the sandbox. Landlock's
+	 * whole security claim is "an unprivileged process can restrict
+	 * itself", and that only holds if it cannot gain privileges
+	 * afterwards. no_new_privs is also one-way and inherited, same as the
+	 * Landlock domain itself.
+	 */
+	if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0)
+		die("prctl(PR_SET_NO_NEW_PRIVS)");
+
+	/*
+	 * The point of no return. The ruleset becomes a "domain" attached to
+	 * this task, inherited across fork and exec. A later restrict_self
+	 * only *intersects* with it: domains stack, they never widen. There is
+	 * no syscall to remove one, and nothing short of task exit clears it.
+	 */
+	if (ll_restrict_self(ruleset, 0) < 0) die("landlock_restrict_self");
 	close(ruleset);
 
 	/*
