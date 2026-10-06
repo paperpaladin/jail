@@ -162,5 +162,24 @@ t 'cannot unsandbox via shell'  13 -- "$J" $SBSH -- /bin/sh -c \
 printf '      --- escape attempt transcript ---\n'
 "$J" $SB -- "$TRY" escape "$TD/deny/secret" 2>&1 | sed 's/^/      | /'
 
+# ===========================================================================
+# 10. transparency: exit status and stdout pass through unchanged
+# ===========================================================================
+tout 'exit status 0 passes through'   0  'hi'   -- "$J" $SBSH -- /bin/sh -c 'echo hi'
+tout 'exit status 42 passes through' 42  ''     -- "$J" $SBSH -- /bin/sh -c 'exit 42'
+tout 'stdout exact, no jail noise'    0  'a
+b'  -- "$J" $SBSH -- /bin/sh -c 'echo a; echo b'
+tout 'stderr not merged into stdout'  0  'O'    -- "$J" $SBSH -- /bin/sh -c \
+	'echo O; echo E >&2'
+# Already-open fds survive: Landlock checks at open() time, so inherited
+# stdin works even though /dev and the pipe's path are not in the allowlist.
+_o=$(printf 'abc' | "$J" $SBSH -- /bin/cat 2>/dev/null)
+[ "$_o" = abc ] && ok 'stdin passes through' \
+	|| bad 'stdin passes through' "got [$_o]"
+# Death by signal is the child's own, because jail execs rather than forks.
+"$J" $SBSH -- /bin/sh -c 'kill -TERM $$' 2>/dev/null
+[ $? -eq 143 ] && ok 'signal death passes through' \
+	|| bad 'signal death passes through' "got $?"
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
