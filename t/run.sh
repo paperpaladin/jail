@@ -151,5 +151,16 @@ t 'shell builtin redirect denied' 2 -- "$J" $SBSH -- /bin/sh -c \
 [ -e "$TD/deny/pwned" ] && bad 'shell could not create denied file' 'it exists' \
 	|| ok 'shell could not create denied file'
 
+# ===========================================================================
+# 9. the child CANNOT drop the restriction  <- Landlock's whole promise
+# ===========================================================================
+t 'cannot unsandbox self'      13  -- "$J" $SB -- "$TRY" escape "$TD/deny/secret"
+t 'cannot unsandbox via shell'  13 -- "$J" $SBSH -- /bin/sh -c \
+	"exec $TRY escape $TD/deny/secret"
+# Show the attempts for the record; this is the one place we read stdout, and
+# only to print it, not to decide anything.
+printf '      --- escape attempt transcript ---\n'
+"$J" $SB -- "$TRY" escape "$TD/deny/secret" 2>&1 | sed 's/^/      | /'
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
