@@ -186,7 +186,7 @@ int main(int argc, char **argv) {
 	/* Parsed rules, in order. shortcut: fixed cap, grow to a realloc'd
 	 * array if anyone ever needs more than 64 path rules. */
 	struct { const char *path; uint64_t rights; } rule[64];
-	int nrule = 0, strict = 0, i;
+	int nrule = 0, strict = 0, i, cmd;
 	int abi, ruleset;
 	uint64_t handled, mask;
 	struct landlock_ruleset_attr attr = {0};
@@ -230,7 +230,10 @@ int main(int argc, char **argv) {
 		usage(stderr);
 		return 125;
 	}
-	if (i >= argc) {
+	/* Hold the command's index in its own variable: `i` is reused below as
+	 * a loop counter, and conflating the two cost an hour once already. */
+	cmd = i;
+	if (cmd >= argc) {
 		fprintf(stderr, "%s: no command given\n", prog);
 		usage(stderr);
 		return 125;
@@ -324,8 +327,8 @@ int main(int argc, char **argv) {
 	 * working -- Landlock checks at open() time, not on read()/write().
 	 * That is the whole transparency story, and it costs zero code.
 	 */
-	execvp(argv[i], &argv[i]);
-	fprintf(stderr, "%s: exec %s: %s\n", prog, argv[i], strerror(errno));
+	execvp(argv[cmd], &argv[cmd]);
+	fprintf(stderr, "%s: exec %s: %s\n", prog, argv[cmd], strerror(errno));
 	/* Shell convention, so callers can tell exec failure from a real exit. */
 	return errno == ENOENT ? 127 : 126;
 }
