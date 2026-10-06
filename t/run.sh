@@ -137,5 +137,19 @@ t 'single-file grant no listing' 13 -- "$J" --ro "$ROOT/t" --ro "$TD/deny/secret
 t 'exec unlisted binary'      126  -- "$J" $SB -- /bin/sh -c true
 t 'exec unlisted via probe'    13  -- "$J" $SB -- "$TRY" exec /bin/sh
 
+# ===========================================================================
+# 8. the restriction is inherited by grandchildren
+# ===========================================================================
+t 'child of shell: denied'     13  -- "$J" $SBSH -- /bin/sh -c \
+	"exec $TRY read $TD/deny/secret"
+t 'child of shell: allowed'     0  -- "$J" $SBSH -- /bin/sh -c \
+	"exec $TRY read $TD/ro/file"
+t 'grandchild of shell: denied' 13 -- "$J" $SBSH -- /bin/sh -c \
+	"/bin/sh -c 'exec $TRY read $TD/deny/secret'"
+t 'shell builtin redirect denied' 2 -- "$J" $SBSH -- /bin/sh -c \
+	"echo x > $TD/deny/pwned"
+[ -e "$TD/deny/pwned" ] && bad 'shell could not create denied file' 'it exists' \
+	|| ok 'shell could not create denied file'
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
