@@ -1,5 +1,6 @@
 # build outputs
 jail
+t/try
 
 # editor / tooling debris
 *.o
