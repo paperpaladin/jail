@@ -86,5 +86,41 @@ t 'list /'                    13  -- "$J" $SB -- "$TRY" list  /
 # grants beneath a path, never above it.
 t 'list parent of granted'    13  -- "$J" $SB -- "$TRY" list  "$TD"
 
+# ===========================================================================
+# 3. writing to a read-only path fails
+# ===========================================================================
+t 'write existing ro file'    13  -- "$J" $SB -- "$TRY" write  "$TD/ro/file"
+t 'create in ro dir'          13  -- "$J" $SB -- "$TRY" create "$TD/ro/new"
+t 'unlink in ro dir'          13  -- "$J" $SB -- "$TRY" unlink "$TD/ro/file"
+t 'mkdir in ro dir'           13  -- "$J" $SB -- "$TRY" mkdir  "$TD/ro/d"
+t 'create in unlisted dir'    13  -- "$J" $SB -- "$TRY" create "$TD/deny/new"
+t 'create in /tmp root'       13  -- "$J" $SB -- "$TRY" create "$TD/new"
+
+# ===========================================================================
+# 4. writing to a read-write path succeeds
+# ===========================================================================
+t 'write existing rw file'     0  -- "$J" $SB -- "$TRY" write  "$TD/rw/file"
+
+# ===========================================================================
+# 5. create / unlink / mkdir / rmdir in rw succeed
+# ===========================================================================
+t 'create in rw dir'           0  -- "$J" $SB -- "$TRY" create "$TD/rw/new"
+t 'unlink in rw dir'           0  -- "$J" $SB -- "$TRY" unlink "$TD/rw/new"
+t 'mkdir in rw dir'            0  -- "$J" $SB -- "$TRY" mkdir  "$TD/rw/d"
+t 'rmdir in rw dir'            0  -- "$J" $SB -- "$TRY" rmdir  "$TD/rw/d"
+# and the kernel really did it, observed from outside the sandbox:
+[ -e "$TD/rw/new" ] && bad 'rw create+unlink round trip' 'file still exists' \
+	|| ok 'rw create+unlink round trip'
+
+# ABI 3 introduced LANDLOCK_ACCESS_FS_TRUNCATE. Before that, truncate() was
+# not a gated operation at all and this assertion would be a lie.
+if [ "$abi" -ge 3 ]; then
+	t 'truncate ro file'  13  -- "$J" $SB -- "$TRY" trunc "$TD/ro/file"
+	t 'truncate rw file'   0  -- "$J" $SB -- "$TRY" trunc "$TD/rw/file"
+else
+	skipt 'truncate ro file' "ABI $abi < 3, truncate not gated"
+	skipt 'truncate rw file' "ABI $abi < 3, truncate not gated"
+fi
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
