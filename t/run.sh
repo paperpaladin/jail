@@ -181,5 +181,20 @@ _o=$(printf 'abc' | "$J" $SBSH -- /bin/cat 2>/dev/null)
 [ $? -eq 143 ] && ok 'signal death passes through' \
 	|| bad 'signal death passes through' "got $?"
 
+# ===========================================================================
+# 11. jail fails closed on its own mistakes (125, distinct from any child)
+# ===========================================================================
+t 'nonexistent --ro path'     125  -- "$J" --ro /nonexistent-xyz -- /bin/true
+t 'no command given'          125  -- "$J" --ro /usr
+t 'unknown option'            125  -- "$J" --bogus -- /bin/true
+t '--ro with no argument'     125  -- "$J" --ro
+if [ "$abi" -ge 5 ]; then
+	t '--strict accepted on new ABI' 0 -- "$J" --strict $SBSH -- /bin/sh -c true
+else
+	t '--strict refuses old ABI'   125 -- "$J" --strict $SBSH -- /bin/sh -c true
+fi
+# Zero rules means zero access -- the degenerate case must still be coherent.
+t 'no rules denies everything' 126  -- "$J" -- /bin/sh -c true
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
