@@ -1,0 +1,10 @@
+# build outputs
+jail
+
+# editor / tooling debris
+*.o
+*.core
+core
+vgcore.*
+.cache/
+compile_commands.json
