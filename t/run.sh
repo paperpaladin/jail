@@ -196,5 +196,38 @@ fi
 # Zero rules means zero access -- the degenerate case must still be coherent.
 t 'no rules denies everything' 126  -- "$J" -- /bin/sh -c true
 
+# ===========================================================================
+# 12. the ABI degradation path, forced with JAIL_ABI_MAX
+# ===========================================================================
+# This is the part of any Landlock program most likely to be wrong, because on
+# a current kernel it never runs. Clamping down lets the kernel judge it too.
+if [ "$abi" -gt 1 ]; then
+	t 'ABI1: still confines'     13 -- env JAIL_ABI_MAX=1 \
+		"$J" $SB -- "$TRY" read "$TD/deny/secret"
+	t 'ABI1: rw still writable'   0 -- env JAIL_ABI_MAX=1 \
+		"$J" $SB -- "$TRY" write "$TD/rw/file"
+	t 'ABI1: --strict refuses'  125 -- env JAIL_ABI_MAX=1 \
+		"$J" --strict $SB -- "$TRY" read "$TD/ro/file"
+	# The honest part: at ABI 1 truncate() is not a gated operation, so a
+	# read-only grant does NOT stop truncation. The oracle confirms the
+	# gap rather than the README merely claiming it.
+	t 'ABI1: truncate NOT gated'  0 -- env JAIL_ABI_MAX=1 \
+		"$J" $SB -- "$TRY" trunc "$TD/ro/file"
+	echo readable > "$TD/ro/file"   # undo it for anyone reading after us
+	# And the degradation is announced, not silent.
+	if env JAIL_ABI_MAX=1 "$J" $SB -- "$TRY" read "$TD/ro/file" 2>&1 \
+	   >/dev/null | grep -q 'warning: landlock ABI 1, degrading'; then
+		ok 'ABI1: warns on stderr'
+	else
+		bad 'ABI1: warns on stderr' 'no warning seen'
+	fi
+else
+	for n in 'ABI1: still confines' 'ABI1: rw still writable' \
+	         'ABI1: --strict refuses' 'ABI1: truncate NOT gated' \
+	         'ABI1: warns on stderr'; do
+		skipt "$n" "kernel is already ABI 1"
+	done
+fi
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

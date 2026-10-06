@@ -129,6 +129,9 @@ static void usage(FILE *f) {
 	    "              is older than this build knows about\n"
 	    "  --abi       print the kernel's Landlock ABI version and exit\n"
 	    "\n"
+	    "env JAIL_ABI_MAX=N pretends the kernel's ABI is at most N (clamps\n"
+	    "down only) so the degradation path can be tested on a new kernel.\n"
+	    "\n"
 	    "Anything not granted is denied: the kernel returns EACCES. The\n"
 	    "restriction is inherited by all descendants and cannot be removed.\n"
 	    "CMD must itself live under an --ro/--rw path, as must its shared\n"
@@ -256,6 +259,23 @@ int main(int argc, char **argv) {
 		    "%s: landlock unavailable (%s); refusing to run unsandboxed\n",
 		    prog, strerror(errno));
 		return 125;
+	}
+
+	/*
+	 * JAIL_ABI_MAX clamps the detected ABI *downward* only. It exists
+	 * because the degradation path is the part of a Landlock program most
+	 * likely to be wrong and least likely to be exercised: you cannot test
+	 * it on a new kernel without it. Clamping up is refused -- pretending
+	 * to have rights the kernel lacks would make create_ruleset EINVAL at
+	 * best and silently unenforced at worst, which is the exact failure
+	 * mode this whole dance exists to prevent.
+	 */
+	{
+		const char *e = getenv("JAIL_ABI_MAX");
+		if (e && *e) {
+			int want = atoi(e);
+			if (want > 0 && want < abi) abi = want;
+		}
 	}
 
 	mask = abi_mask(abi);
