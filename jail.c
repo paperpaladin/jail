@@ -94,19 +94,25 @@ static inline int ll_restrict_self(int fd, uint32_t flags) {
 	LANDLOCK_ACCESS_FS_TRUNCATE |       \
 	LANDLOCK_ACCESS_FS_IOCTL_DEV)
 
+/* The highest ABI this program knows how to use. */
+#define JAIL_ABI_KNOWN 5
+
 static const char *prog = "jail";
+
+static void die(const char *what) {
+	fprintf(stderr, "%s: %s: %s\n", prog, what, strerror(errno));
+	exit(125); /* 125: jail itself failed, distinct from any child status */
+}
 
 static void usage(FILE *f) {
 	fprintf(f,
-	    "usage: %s [--ro PATH]... [--rw PATH]... -- CMD [ARGS...]\n"
+	    "usage: %s [--ro PATH]... [--rw PATH]... [--strict] -- CMD [ARGS...]\n"
 	    "\n"
 	    "  --ro PATH   allow read and execute beneath PATH\n"
 	    "  --rw PATH   allow read, execute, write, create and delete beneath PATH\n"
+	    "  --strict    fail instead of degrading when the kernel's Landlock ABI\n"
+	    "              is older than this build knows about\n"
 	    "  --abi       print the kernel's Landlock ABI version and exit\n"
-	    "\n"
-	    "NOTE: nothing is enforced yet -- the Landlock ruleset is not built\n"
-	    "until the next two commits. Argument handling and the exec/exit-status\n"
-	    "passthrough land first so each can be judged on its own.\n"
 	    "\n"
 	    "Anything not granted is denied: the kernel returns EACCES. The\n"
 	    "restriction is inherited by all descendants and cannot be removed.\n"
@@ -115,12 +121,30 @@ static void usage(FILE *f) {
 	    prog);
 }
 
+/*
+ * Drop the ABI bits the running kernel does not have. Landlock refuses a
+ * ruleset whose handled_access_fs contains an unknown bit (EINVAL) rather
+ * than silently ignoring it -- deliberate, so a program cannot *think* it
+ * sandboxed something the kernel never enforced. The flip side is that every
+ * caller must do this dance by hand. Best-effort mode is the honest default:
+ * on an old kernel you get weaker confinement, and we say so on stderr.
+ */
+static uint64_t abi_mask(int abi) {
+	uint64_t m = ~0ULL;
+	if (abi < 5) m &= ~LANDLOCK_ACCESS_FS_IOCTL_DEV;
+	if (abi < 3) m &= ~LANDLOCK_ACCESS_FS_TRUNCATE;
+	if (abi < 2) m &= ~LANDLOCK_ACCESS_FS_REFER;
+	return m;
+}
+
 int main(int argc, char **argv) {
 	/* Parsed rules, in order. shortcut: fixed cap, grow to a realloc'd
 	 * array if anyone ever needs more than 64 path rules. */
 	struct { const char *path; uint64_t rights; } rule[64];
-	int nrule = 0, i;
-	int abi;
+	int nrule = 0, strict = 0, i;
+	int abi, ruleset;
+	uint64_t handled, mask;
+	struct landlock_ruleset_attr attr = {0};
 
 	if (argv[0]) prog = argv[0];
 
@@ -130,6 +154,7 @@ int main(int argc, char **argv) {
 			usage(stdout);
 			return 0;
 		}
+		if (!strcmp(argv[i], "--strict")) { strict = 1; continue; }
 		if (!strcmp(argv[i], "--abi")) {
 			abi = ll_create_ruleset(NULL, 0,
 			    LANDLOCK_CREATE_RULESET_VERSION);
@@ -165,6 +190,63 @@ int main(int argc, char **argv) {
 		usage(stderr);
 		return 125;
 	}
+
+	/*
+	 * Ask the kernel which ABI it speaks. This is the only supported
+	 * feature-detection mechanism: there is no /sys knob listing the
+	 * individual access rights, so "create a ruleset with flag VERSION and
+	 * no attr" is how you probe.
+	 */
+	abi = ll_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION);
+	if (abi < 0) {
+		/*
+		 * ENOSYS: kernel without Landlock compiled in.
+		 * EOPNOTSUPP: compiled in but not enabled (missing from
+		 * lsm= on the kernel command line).
+		 */
+		fprintf(stderr,
+		    "%s: landlock unavailable (%s); refusing to run unsandboxed\n",
+		    prog, strerror(errno));
+		return 125;
+	}
+
+	mask = abi_mask(abi);
+	if (abi < JAIL_ABI_KNOWN) {
+		if (strict) {
+			fprintf(stderr,
+			    "%s: landlock ABI %d < %d and --strict given\n",
+			    prog, abi, JAIL_ABI_KNOWN);
+			return 125;
+		}
+		/* Best effort: say exactly what is not being enforced. */
+		fprintf(stderr,
+		    "%s: warning: landlock ABI %d, degrading (no%s%s%s)\n",
+		    prog, abi,
+		    abi < 2 ? " cross-hierarchy-rename-control" : "",
+		    abi < 3 ? " truncate-control" : "",
+		    abi < 5 ? " device-ioctl-control" : "");
+	}
+
+	/*
+	 * handled_access_fs is the set of operations this ruleset *decides*.
+	 * Anything not handled is left entirely to the rest of the kernel --
+	 * so handling more is stricter, and a right we handle but never grant
+	 * is thereby denied everywhere.
+	 */
+	handled = (JAIL_FS_READ | JAIL_FS_WRITE) & mask;
+	attr.handled_access_fs = handled;
+
+	/*
+	 * Pass the size of the struct we know; the kernel uses it to tell
+	 * which fields exist (extensible-struct convention). Our struct may be
+	 * larger than an old kernel expects, so clamp to the fields we set --
+	 * handled_access_fs only. shortcut: bump this when we start setting
+	 * handled_access_net or scoped; see PLAN.md Milestone 2.
+	 */
+	ruleset = ll_create_ruleset(&attr, sizeof(attr.handled_access_fs), 0);
+	if (ruleset < 0) die("landlock_create_ruleset");
+
+	close(ruleset);
 
 	/*
 	 * exec, not fork+exec: the child *is* this process, so its exit status
