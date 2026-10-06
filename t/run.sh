@@ -122,5 +122,13 @@ else
 	skipt 'truncate rw file' "ABI $abi < 3, truncate not gated"
 fi
 
+# ===========================================================================
+# 6. a single *file* may be granted, and that does not grant its directory
+# ===========================================================================
+t 'single-file grant reads'     0  -- "$J" --ro "$ROOT/t" --ro "$TD/deny/secret" \
+                                      -- "$TRY" read "$TD/deny/secret"
+t 'single-file grant no listing' 13 -- "$J" --ro "$ROOT/t" --ro "$TD/deny/secret" \
+                                      -- "$TRY" list "$TD/deny"
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
