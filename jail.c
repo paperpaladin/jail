@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -94,6 +95,19 @@ static inline int ll_restrict_self(int fd, uint32_t flags) {
 	LANDLOCK_ACCESS_FS_TRUNCATE |       \
 	LANDLOCK_ACCESS_FS_IOCTL_DEV)
 
+/*
+ * Rights that are meaningless on a non-directory. The kernel rejects a rule
+ * with EINVAL if it grants a directory-only right on a regular file, so a
+ * plain `--ro /etc/resolv.conf` would fail unless we mask. Everything not
+ * listed here is directory-only.
+ */
+#define JAIL_FS_FILE_OK (                   \
+	LANDLOCK_ACCESS_FS_EXECUTE |        \
+	LANDLOCK_ACCESS_FS_WRITE_FILE |     \
+	LANDLOCK_ACCESS_FS_READ_FILE |      \
+	LANDLOCK_ACCESS_FS_TRUNCATE |       \
+	LANDLOCK_ACCESS_FS_IOCTL_DEV)
+
 /* The highest ABI this program knows how to use. */
 #define JAIL_ABI_KNOWN 5
 
@@ -135,6 +149,36 @@ static uint64_t abi_mask(int abi) {
 	if (abi < 3) m &= ~LANDLOCK_ACCESS_FS_TRUNCATE;
 	if (abi < 2) m &= ~LANDLOCK_ACCESS_FS_REFER;
 	return m;
+}
+
+/* Grant `rights` beneath `path`, clamped to what makes sense for its type. */
+static void add_path(int ruleset, const char *path, uint64_t rights) {
+	struct landlock_path_beneath_attr pb = {0};
+	struct stat st;
+
+	/*
+	 * O_PATH: we only need the fd as a reference to the inode, we are not
+	 * reading it, and O_PATH works on things we could not open normally
+	 * (directories we lack read on, device nodes, dangling mount points).
+	 */
+	pb.parent_fd = open(path, O_PATH | O_CLOEXEC);
+	if (pb.parent_fd < 0) {
+		fprintf(stderr, "%s: %s: %s\n", prog, path, strerror(errno));
+		/*
+		 * Fail closed on a bad path. A typo in --rw would otherwise
+		 * silently become "deny", and the user would debug the wrong
+		 * thing for an hour.
+		 */
+		exit(125);
+	}
+	if (fstat(pb.parent_fd, &st) < 0) die(path);
+
+	pb.allowed_access = rights;
+	if (!S_ISDIR(st.st_mode)) pb.allowed_access &= JAIL_FS_FILE_OK;
+
+	if (ll_add_rule(ruleset, LANDLOCK_RULE_PATH_BENEATH, &pb, 0) < 0)
+		die(path);
+	close(pb.parent_fd);
 }
 
 int main(int argc, char **argv) {
@@ -245,6 +289,9 @@ int main(int argc, char **argv) {
 	 */
 	ruleset = ll_create_ruleset(&attr, sizeof(attr.handled_access_fs), 0);
 	if (ruleset < 0) die("landlock_create_ruleset");
+
+	for (i = 0; i < nrule; i++)
+		add_path(ruleset, rule[i].path, rule[i].rights & mask);
 
 	close(ruleset);
 
