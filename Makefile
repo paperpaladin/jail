@@ -13,7 +13,10 @@ jail: jail.c
 t/try: t/try.c
 	$(CC) $(CFLAGS) -static -o $@ $<
 
+test: all
+	@t/run.sh
+
 clean:
 	rm -f jail t/try
 
-.PHONY: all clean
+.PHONY: all test clean
