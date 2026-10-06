@@ -130,5 +130,12 @@ t 'single-file grant reads'     0  -- "$J" --ro "$ROOT/t" --ro "$TD/deny/secret"
 t 'single-file grant no listing' 13 -- "$J" --ro "$ROOT/t" --ro "$TD/deny/secret" \
                                       -- "$TRY" list "$TD/deny"
 
+# ===========================================================================
+# 7. exec is gated too: a binary outside the allowlist cannot be run
+# ===========================================================================
+# 126 is jail's "exec refused" status; the underlying errno is EACCES.
+t 'exec unlisted binary'      126  -- "$J" $SB -- /bin/sh -c true
+t 'exec unlisted via probe'    13  -- "$J" $SB -- "$TRY" exec /bin/sh
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
