@@ -133,7 +133,7 @@ ok    ABI1: --strict refuses
 ok    ABI1: truncate NOT gated
 ok    ABI1: warns on stderr
 
-61 passed, 0 failed, 0 skipped
+77 passed, 0 failed, 0 skipped
 ```
 
 The escape transcript is the interesting one. A child under `jail` tries to
@@ -159,6 +159,9 @@ confinement test as **skipped**. It never reports a pass it did not earn.
   still works -- which is the intent, not a hole.
 - `--rw-no-exec PATH` is `--rw` without execute: a scratch directory a process
   can fill but cannot run anything out of.
+- `--deny PATH` withholds a subtree from a broader grant above it:
+  `--ro /home --deny /home/me/.ssh`. Landlock has no deny rule, so see below
+  for how this is done and what it costs.
 - Paths may be single files, not just directories.
 - Inherited by all descendants, across `fork` and `exec`, forever.
 - Irrevocable by the sandboxed process.
@@ -170,6 +173,54 @@ confinement test as **skipped**. It never reports a pass it did not earn.
   unsandboxed. `125` is reserved for `jail`'s own failures, `126`/`127` for
   exec failures, anything else is the command's.
 - Graceful ABI degradation, with the missing enforcement named on stderr.
+
+### `--deny`
+
+Landlock cannot express it, and that was established against the kernel rather
+than assumed. Two facts, measured on ABI 10:
+
+- A rule with `allowed_access == 0` is refused with `ENOMSG`, so "deny" cannot
+  be written as a rule that grants nothing.
+- Rules within one ruleset are **additive, not shadowed by depth**. Granting
+  `READ_FILE` on a parent and only `READ_DIR` on a child still leaves files
+  under the child readable. There is no subtraction at any depth.
+
+So `--deny` works by never granting anything that encloses the denied path. It
+walks down from the grant and grants each level's *other* children
+individually; the path to the denied subtree is simply never granted. One flag
+becomes one rule per sibling, which is why the 64-rule cap had to go first.
+
+Every child is canonicalised with `realpath` before it is considered, and only
+children whose canonical path lies **strictly inside** the directory being
+split are considered at all. That is not tidiness; three separate symlink
+attacks work without it, and the tests for all three failed against the first
+version of this code:
+
+- A sibling symlink pointing *into* the denied subtree. The entry named `.ssh`
+  is skipped, the entry named `alias` is granted, `add_path` opens with
+  `O_PATH` which follows, and the denied inode is granted under another name.
+- The same in reverse: `--deny alias` canonicalises to `.ssh`, the entry named
+  `.ssh` is skipped, and `alias` is granted anyway.
+- A symlink pointing *out* of the grant. Granting it hands over its target, so
+  adding a `--deny` would make the sandbox **wider** than the same command
+  without one. That is the worst of the three, and the reason the test is
+  containment rather than merely inequality.
+
+Strict containment also guarantees termination: a symlink to its own ancestor
+would otherwise recurse forever.
+
+**What it costs.** The directories between the grant and the denied path get no
+rule of their own, so they cannot be listed. A rule on them would grant listing
+of everything beneath, the denied subtree included. Traversal still works --
+Landlock gates operations, not path lookup -- so `--ro /home --deny
+/home/me/.ssh` leaves `/home/me/.bashrc` readable and `ls /home/me` denied.
+The suite asserts that, because it is surprising enough to be mistaken for a
+bug.
+
+A `--deny` that falls inside no grant is refused rather than ignored, because
+it denies nothing and is almost always a typo. Denies are global rather than
+positional: a `--deny` applies to every grant it falls inside, wherever it sits
+on the command line.
 
 ### What does not work
 
@@ -208,6 +259,18 @@ Honestly:
   kernel has no reason to object. The flag is worth having -- it closes the
   download-then-`chmod +x`-then-run path -- but it is not a sandbox against
   someone who already has a working interpreter inside the allowlist.
+- **`--deny` costs you `ls` of the directories between the grant and the
+  denied path.** Explained above; it is inherent to Landlock's rules applying
+  to whole subtrees, not a shortcut taken here.
+- **`--deny` does not follow symlinks out of the grant, so those stop
+  working.** Without a `--deny` a symlink inside a granted tree pointing
+  outside it was already useless, because the target inode was never granted.
+  With one, the symlink is additionally not granted itself. The net effect is
+  the same and the reason is different.
+- **`--deny` enumerates at startup.** A directory whose contents change
+  between `jail` reading it and the command running is a race: an entry created
+  afterwards was never granted, so it is inaccessible rather than exposed. The
+  safe direction, and still a surprise.
 - **`--rox` is not secrecy.** It stops enumeration, not reading. Anything whose
   name can be guessed or is compiled into the attacker's payload is still
   readable. It raises the cost of reconnaissance; it does not make files

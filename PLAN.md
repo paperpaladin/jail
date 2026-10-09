@@ -175,10 +175,20 @@ documented below.
       succeed. Both flags got a "what this does not buy you" entry in the
       README: `--rox` is not secrecy, and `--rw-no-exec` does nothing about an
       interpreter already inside the allowlist.
-- [ ] Explicit `--deny PATH` that shadows a broader grant.
+- [x] Explicit `--deny PATH` that shadows a broader grant.
       why: `--ro /home --deny /home/me/.ssh` is the common request. Landlock
       has no deny rules, so this must be done by granting the siblings; doing
       that correctly by hand is exactly the tedium worth hiding.
+      done: and "has no deny rules" was measured rather than assumed -- a rule
+      with allowed_access 0 is refused with ENOMSG, and rules in one ruleset
+      are additive rather than shadowed by depth, so there is no subtraction at
+      any depth. 16 assertions. Three symlink attacks all worked against the
+      first version: a sibling link into the denied subtree, the same in
+      reverse via `--deny` on the link, and -- the serious one -- a link
+      pointing out of the grant, where granting it would have made the sandbox
+      WIDER with the deny than without it. Children are now canonicalised and
+      only considered when strictly inside the directory being split, which
+      also makes an ancestor symlink terminate.
 - [ ] Resolve `CMD` through `PATH` *before* restricting, and auto-grant the
       resolved binary, its interpreter, and `ldd`'s output, behind `--auto`.
       why: "the command must be in its own allowlist" is the single biggest

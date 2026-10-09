@@ -12,8 +12,10 @@
  */
 
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <linux/landlock.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -154,6 +156,7 @@ static void usage(FILE *f) {
 	    "  --rw PATH          read, execute, write, create and delete\n"
 	    "  --rox PATH         read and execute, but no directory listing\n"
 	    "  --rw-no-exec PATH  read, write, create and delete, but no execute\n"
+	    "  --deny PATH        withhold PATH from a broader grant above it\n"
 	    "  --strict           fail instead of degrading when the kernel's\n"
 	    "                     Landlock ABI is older than this build knows\n"
 	    "  --abi              print the kernel's Landlock ABI version and exit\n"
@@ -217,6 +220,135 @@ static void rule_add(const char *path, uint64_t rights) {
 	rules[nrule].path = path;
 	rules[nrule].rights = rights;
 	nrule++;
+}
+
+/*
+ * --deny, which Landlock has no way to express.
+ *
+ * A rule only ever ADDS rights, and that was established against the kernel
+ * rather than assumed. Two facts, both measured on ABI 10:
+ *
+ *   - A rule with allowed_access == 0 is refused with ENOMSG, so "deny" cannot
+ *     be written as a rule granting nothing.
+ *   - Rules within one ruleset are additive, not shadowed by depth. Granting
+ *     READ_FILE on a parent and only READ_DIR on a child leaves files under
+ *     the child readable. There is no subtraction at any depth.
+ *
+ * So the only way to withhold a subtree is to never grant anything that
+ * encloses it. Walk down from the grant toward the denied path and grant each
+ * level's *other* children individually; the path to the denied subtree is
+ * simply never granted.
+ *
+ * The cost is real and worth naming: the directories between the grant and the
+ * denied path end up with no rule of their own, so they cannot be listed. A
+ * rule on them would grant listing of everything beneath, the denied subtree
+ * included. Traversal through them still works, because Landlock gates
+ * operations and not path lookup -- only the `ls` of those particular
+ * directories is lost.
+ *
+ * shortcut: one rule per sibling, and every rule costs an open file descriptor
+ * while the ruleset is built. A --deny under a directory of tens of thousands
+ * of entries will meet RLIMIT_NOFILE. Upgrade path: install rules in batches,
+ * closing each fd as it goes, which add_path already does -- what is missing is
+ * not holding the whole expansion in memory first.
+ */
+static char **deny;
+static int ndeny;
+
+static char *xstrdup(const char *s) {
+	char *p = strdup(s);
+	if (!p) { fprintf(stderr, "%s: out of memory\n", prog); exit(125); }
+	return p;
+}
+
+/*
+ * Canonical, because a security tool that compares paths as strings can be
+ * walked around with a symlink or a `..`. realpath(3) resolves both, and the
+ * resolved path is also what the kernel will match at open() time.
+ */
+static char *canon(const char *path, const char *what) {
+	char *r = realpath(path, NULL);
+	if (!r) {
+		fprintf(stderr, "%s: %s %s: %s\n", prog, what, path, strerror(errno));
+		exit(125);
+	}
+	return r;
+}
+
+/* Is `d` the same path as `p`, or inside it? Both must be canonical. */
+static int inside(const char *p, const char *d) {
+	size_t n = strlen(p);
+	if (strncmp(p, d, n) != 0) return 0;
+	if (d[n] == 0) return 1;
+	/* "/ab" is not inside "/a", but "/a/b" is. */
+	return p[n - 1] == '/' || d[n] == '/';
+}
+
+/*
+ * `path` is canonical. Grants it, or splits it and recurses, so that nothing
+ * enclosing a denied path is ever granted.
+ *
+ * Every child is canonicalised before it is looked at, and only children whose
+ * canonical path lies STRICTLY INSIDE `path` are considered at all. Three
+ * different symlink attacks made that necessary, and the tests for all three
+ * failed on the first version of this function, which compared the names as
+ * written:
+ *
+ *   - A sibling symlink pointing into the denied subtree. `--deny d` skips the
+ *     entry named `d`, then grants the entry named `alias`, and add_path opens
+ *     with O_PATH, which follows -- so the denied inode is granted under
+ *     another name and the deny does nothing.
+ *   - The same thing in reverse: `--deny alias` canonicalises to `d`, and the
+ *     entry literally named `d` is skipped, but `alias` is granted.
+ *   - A symlink pointing OUT of the grant. Granting it would hand over its
+ *     target, so adding a --deny could make the sandbox *wider* than the same
+ *     command without one. That is the worst of the three and the reason the
+ *     test is containment rather than just inequality.
+ *
+ * Strict containment also guarantees termination, which matters because a
+ * symlink to its own ancestor would otherwise recurse forever.
+ */
+static void expand(const char *path, uint64_t rights) {
+	int has_denied_child = 0;
+
+	for (int i = 0; i < ndeny; i++) {
+		if (!strcmp(deny[i], path)) return;   /* this whole subtree is out */
+		if (inside(path, deny[i])) has_denied_child = 1;
+	}
+	if (!has_denied_child) {
+		rule_add(xstrdup(path), rights);
+		return;
+	}
+
+	DIR *d = opendir(path);
+	if (!d) {
+		/* Fail closed. Being unable to enumerate a directory we must split
+		 * means we cannot tell which children are safe to grant, and
+		 * granting the lot would hand over the thing being denied. */
+		fprintf(stderr, "%s: cannot read %s to apply --deny: %s\n",
+		        prog, path, strerror(errno));
+		exit(125);
+	}
+	struct dirent *e;
+	while ((e = readdir(d))) {
+		if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+		char child[PATH_MAX];
+		int n = snprintf(child, sizeof child, "%s/%s", path, e->d_name);
+		if (n < 0 || n >= (int)sizeof child) {
+			fprintf(stderr, "%s: path too long under %s: %s\n",
+			        prog, path, e->d_name);
+			closedir(d);
+			exit(125);
+		}
+		/* A dangling symlink resolves to nothing and grants nothing, which
+		 * is an ordinary thing to find in a directory rather than an error. */
+		char *real = realpath(child, NULL);
+		if (!real) continue;
+		if (inside(path, real) && strcmp(path, real) != 0)
+			expand(real, rights);
+		free(real);
+	}
+	closedir(d);
 }
 
 /* Grant `rights` beneath `path`, clamped to what makes sense for its type. */
@@ -285,6 +417,19 @@ int main(int argc, char **argv) {
 				return 125;
 			}
 			rule_add(argv[++i], grant[g].rights);
+			continue;
+		}
+		if (!strcmp(argv[i], "--deny")) {
+			if (i + 1 >= argc) {
+				fprintf(stderr, "%s: --deny needs a PATH\n", prog);
+				return 125;
+			}
+			char **p = realloc(deny, (size_t)(ndeny + 1) * sizeof *p);
+			if (!p) { fprintf(stderr, "%s: out of memory\n", prog); return 125; }
+			deny = p;
+			/* Canonicalised here so a typo fails now rather than silently
+			 * denying nothing, and so a symlink cannot sidestep it. */
+			deny[ndeny++] = canon(argv[++i], "--deny");
 			continue;
 		}
 		fprintf(stderr, "%s: unknown option: %s\n", prog, argv[i]);
@@ -371,6 +516,45 @@ int main(int argc, char **argv) {
 	 */
 	ruleset = ll_create_ruleset(&attr, sizeof(attr.handled_access_fs), 0);
 	if (ruleset < 0) die("landlock_create_ruleset");
+
+	/*
+	 * Expansion happens here, after the ruleset exists and before anything is
+	 * installed. Denies are global rather than positional: --deny applies to
+	 * every grant it falls inside, wherever it sits on the command line,
+	 * because the alternative is a flag whose meaning depends on argument
+	 * order and nobody gets that right from the help text.
+	 */
+	if (ndeny) {
+		Rule *typed = rules;
+		int ntyped = nrule;
+
+		/* Validate before expanding. A --deny inside no grant denies
+		 * nothing, which is a typo worth refusing rather than a no-op worth
+		 * ignoring -- and refusing it before any work is done means the
+		 * diagnostic is not buried under a thousand expanded rules. */
+		for (int d = 0; d < ndeny; d++) {
+			int covered = 0;
+			for (i = 0; i < ntyped && !covered; i++) {
+				char *root = canon(typed[i].path, "");
+				covered = inside(root, deny[d]);
+				free(root);
+			}
+			if (!covered) {
+				fprintf(stderr, "%s: --deny %s is not beneath any grant, "
+				        "so it denies nothing\n", prog, deny[d]);
+				return 125;
+			}
+		}
+
+		rules = NULL;
+		nrule = rulecap = 0;
+		for (i = 0; i < ntyped; i++) {
+			char *root = canon(typed[i].path, "");
+			expand(root, typed[i].rights);
+			free(root);
+		}
+		free(typed);
+	}
 
 	for (i = 0; i < nrule; i++)
 		add_path(ruleset, rules[i].path, rules[i].rights & mask);

@@ -171,6 +171,74 @@ t 'rw-no-exec: exec denied'     13  -- "$J" $RWX -- "$TRY" exec   "$TD/rw/prog"
 t 'rw: that binary does exec'    2  -- "$J" $SB  -- "$TRY" exec   "$TD/rw/prog"
 
 # ===========================================================================
+# 8b. --deny withholds a subtree from a broader grant
+# ===========================================================================
+# Landlock cannot express this. A rule only ever adds rights -- a rule granting
+# nothing is refused with ENOMSG, and rules in one ruleset are additive rather
+# than shadowed by depth -- so --deny works by never granting anything that
+# encloses the denied path, and granting each level's other children instead.
+#
+# The control first: with $TD granted and nothing denied, the secret is
+# readable. Without this line the assertion below would pass for a jail that
+# simply failed to grant $TD at all.
+DENYSB="--ro $ROOT/t --ro $TD"
+t 'control: granted parent exposes it'  0  -- "$J" $DENYSB -- "$TRY" read "$TD/deny/secret"
+t 'deny: the subtree is withheld'      13  -- "$J" $DENYSB --deny "$TD/deny" \
+                                              -- "$TRY" read "$TD/deny/secret"
+t 'deny: a sibling is still granted'    0  -- "$J" $DENYSB --deny "$TD/deny" \
+                                              -- "$TRY" read "$TD/ro/file"
+t 'deny: and rw siblings still work'    0  -- "$J" --ro "$ROOT/t" --rw "$TD" \
+                                              --deny "$TD/deny" \
+                                              -- "$TRY" write "$TD/rw/file"
+
+# A single file can be denied, not just a directory.
+t 'deny: one file, not a directory'    13  -- "$J" $DENYSB --deny "$TD/deny/secret" \
+                                              -- "$TRY" read "$TD/deny/secret"
+
+# The security-critical one. Comparing paths as strings lets a symlink or a
+# `..` walk around the deny, so both sides are canonicalised with realpath.
+ln -sfn "$TD/deny" "$TD/alias"
+t 'deny: a symlink to it is denied too' 13 -- "$J" $DENYSB --deny "$TD/deny" \
+                                              -- "$TRY" read "$TD/alias/secret"
+t 'deny: denying via the symlink works' 13 -- "$J" $DENYSB --deny "$TD/alias" \
+                                              -- "$TRY" read "$TD/deny/secret"
+t 'deny: and via a ".." path'          13  -- "$J" $DENYSB --deny "$TD/ro/../deny" \
+                                              -- "$TRY" read "$TD/deny/secret"
+
+# A symlink pointing OUT of the grant must not become a grant of its target.
+# This is the attack that makes the containment test necessary rather than just
+# an inequality test: expansion grants each child individually, add_path opens
+# with O_PATH which follows, so granting a symlink grants whatever it points
+# at -- and adding a --deny would make the sandbox WIDER than the same command
+# without one. Asserted both ways, because only the pair shows that --deny did
+# not change it.
+ln -sfn /etc "$TD/escape"
+t 'no deny: a symlink out is not a grant'  13 -- "$J" $DENYSB \
+                                                  -- "$TRY" read "$TD/escape/passwd"
+t 'deny: and expansion does not widen it'  13 -- "$J" $DENYSB --deny "$TD/deny" \
+                                                  -- "$TRY" read "$TD/escape/passwd"
+
+# A symlink to its own ancestor must terminate rather than recurse forever.
+ln -sfn "$TD" "$TD/ro/loop"
+t 'deny: a symlink to an ancestor terminates' 0 -- "$J" $DENYSB --deny "$TD/deny" \
+                                                   -- "$TRY" read "$TD/ro/file"
+rm -f "$TD/ro/loop"
+
+# The documented cost: the directories between the grant and the denied path
+# get no rule of their own, because a rule on them would grant listing of
+# everything beneath including the denied subtree. Traversal still works --
+# Landlock gates operations, not lookup -- so only the ls of $TD is lost.
+t 'deny: the split parent cannot be listed' 13 -- "$J" $DENYSB --deny "$TD/deny" \
+                                                   -- "$TRY" list "$TD"
+t 'deny: but paths through it still resolve'  0 -- "$J" $DENYSB --deny "$TD/deny" \
+                                                   -- "$TRY" read "$TD/ro/file"
+
+# Fail closed on a --deny that cannot mean anything.
+t 'deny: outside every grant is refused' 125 -- "$J" $DENYSB --deny /etc -- /bin/true
+t 'deny: a nonexistent path is refused'  125 -- "$J" $DENYSB --deny "$TD/nope" -- /bin/true
+t 'deny: with no argument is refused'    125 -- "$J" $DENYSB --deny
+
+# ===========================================================================
 # 9. the restriction is inherited by grandchildren
 # ===========================================================================
 t 'child of shell: denied'     13  -- "$J" $SBSH -- /bin/sh -c \
