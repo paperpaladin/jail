@@ -1,12 +1,14 @@
 # jail
 
-Run a command that can only touch the filesystem paths you list, using the Linux Landlock LSM -- no root, no setuid, no container.
+Run a command that can only touch the filesystem paths you list, using the
+Linux Landlock LSM -- no root, no setuid, no container.
 
 ```
 jail --ro /usr --rw /tmp -- make
 ```
 
-Everything not granted is denied, the restriction is inherited by every descendant, and the command cannot take it off.
+Everything not granted is denied, the restriction is inherited by every
+descendant, and the command cannot take it off.
 
 ## Build
 
@@ -92,6 +94,16 @@ ok    single-file grant reads
 ok    single-file grant no listing
 ok    exec unlisted binary
 ok    exec unlisted via probe
+ok    rox: read file beneath
+ok    rox: cannot list directory
+ok    rox: exec beneath allowed
+ok    rox on a file reads
+ok    rw-no-exec: write works
+ok    rw-no-exec: create works
+ok    rw-no-exec: unlink works
+ok    rw-no-exec: list works
+ok    rw-no-exec: exec denied
+ok    rw: that binary does exec
 ok    child of shell: denied
 ok    child of shell: allowed
 ok    grandchild of shell: denied
@@ -121,7 +133,7 @@ ok    ABI1: --strict refuses
 ok    ABI1: truncate NOT gated
 ok    ABI1: warns on stderr
 
-50 passed, 0 failed, 0 skipped
+60 passed, 0 failed, 0 skipped
 ```
 
 The escape transcript is the interesting one. A child under `jail` tries to
@@ -141,6 +153,12 @@ confinement test as **skipped**. It never reports a pass it did not earn.
 - `--ro PATH` grants read, execute and directory listing beneath `PATH`.
 - `--rw PATH` additionally grants write, truncate, create, delete, rename and
   device ioctl beneath `PATH`.
+- `--rox PATH` is `--ro` without directory listing: a process can run and read
+  what is beneath `PATH` but cannot enumerate it. Landlock gates operations
+  rather than path lookup, so opening a filename the process already knows
+  still works -- which is the intent, not a hole.
+- `--rw-no-exec PATH` is `--rw` without execute: a scratch directory a process
+  can fill but cannot run anything out of.
 - Paths may be single files, not just directories.
 - Inherited by all descendants, across `fork` and `exec`, forever.
 - Irrevocable by the sandboxed process.
@@ -184,6 +202,16 @@ Honestly:
   `open()`, not at `read()`/`write()`. This is why inherited stdin/stdout keep
   working, and it means any fd the command inherits is usable regardless of
   the allowlist. Do not hand a jailed process an fd you did not mean to give it.
+- **`--rw-no-exec` does not stop interpreted code.** It gates `execve`, which
+  is the only thing Landlock gates. A process that can read a file and can also
+  reach an interpreter runs `python /scratch/payload.py` as a *read*, and the
+  kernel has no reason to object. The flag is worth having -- it closes the
+  download-then-`chmod +x`-then-run path -- but it is not a sandbox against
+  someone who already has a working interpreter inside the allowlist.
+- **`--rox` is not secrecy.** It stops enumeration, not reading. Anything whose
+  name can be guessed or is compiled into the attacker's payload is still
+  readable. It raises the cost of reconnaissance; it does not make files
+  confidential.
 - **`/proc` is not special-cased.** If you `--ro /proc` you have granted a
   great deal; if you do not, some tools will simply break.
 - **Symlinks are resolved when the rule is added**, not when the command runs.
@@ -191,7 +219,7 @@ Honestly:
   later inside an allowed directory cannot be used to escape (the *target* is
   what gets checked at open time), but it is worth knowing which inode you
   actually granted.
-- **No 64-rule-plus support.** Hard cap of 64 `--ro`/`--rw` rules.
+- **No 64-rule-plus support.** Hard cap of 64 path rules of any kind.
 - **Cannot run under valgrind.** valgrind does not implement syscall 444, so
   it returns ENOSYS and `jail` correctly refuses to run unsandboxed. The
   refusal is the right behaviour; it just makes `valgrind jail ...` useless.
@@ -201,12 +229,12 @@ Honestly:
 
 ## Design
 
-One file, `jail.c`, 354 lines, over half of them comments explaining why the
+One file, `jail.c`, 384 lines, over half of them comments explaining why the
 kernel insists on something.
 
 ```
 parse args  ->  probe ABI  ->  mask rights to ABI  ->  create ruleset
-            ->  add one path_beneath rule per --ro/--rw
+            ->  add one path_beneath rule per grant
             ->  prctl(PR_SET_NO_NEW_PRIVS)  ->  landlock_restrict_self
             ->  execvp
 ```

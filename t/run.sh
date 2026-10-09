@@ -43,8 +43,9 @@ if [ -z "$abi" ] || [ "$abi" = 0 ]; then
 	echo "kernel's lsm= list. Every filesystem-confinement test needs the"
 	echo "kernel to be the oracle, so they are SKIPPED, not passed."
 	for n in read-allowed read-denied write-ro write-rw create unlink mkdir \
-	         list truncate inherit-grandchild cannot-unsandbox \
-	         transparency-status transparency-stdout; do
+	         list truncate rox-no-listing rox-exec-allowed \
+	         rw-no-exec-writes rw-no-exec-denied inherit-grandchild \
+	         cannot-unsandbox transparency-status transparency-stdout; do
 		skipt "$n" "no landlock"
 	done
 	printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
@@ -138,7 +139,39 @@ t 'exec unlisted binary'      126  -- "$J" $SB -- /bin/sh -c true
 t 'exec unlisted via probe'    13  -- "$J" $SB -- "$TRY" exec /bin/sh
 
 # ===========================================================================
-# 8. the restriction is inherited by grandchildren
+# 8. --rox and --rw-no-exec: the two grants that differ by a single bit
+# ===========================================================================
+# --rox is --ro without READ_DIR. Section 1 already asserted that the same
+# open() of the same directory succeeds under --ro, so the only thing that
+# changed here is that one bit.
+ROX="--rox $ROOT/t --rox $TD/ro"
+t 'rox: read file beneath'       0  -- "$J" $ROX -- "$TRY" read "$TD/ro/file"
+t 'rox: cannot list directory'  13  -- "$J" $ROX -- "$TRY" list "$TD/ro"
+# The probe is static, so re-exec'ing it under --rox proves EXECUTE survived.
+# 2 is try's own "wrong argument count" status, which it can only reach by
+# having been exec'd at all.
+t 'rox: exec beneath allowed'    2  -- "$J" $ROX -- "$TRY" exec "$TRY"
+# READ_DIR is meaningless on a non-directory and the kernel rejects a rule
+# that grants it there, so --rox on a plain file must behave like --ro.
+t 'rox on a file reads'          0  -- "$J" --rox "$ROOT/t" --rox "$TD/deny/secret" \
+                                       -- "$TRY" read "$TD/deny/secret"
+
+# --rw-no-exec is --rw without EXECUTE. The target has to be genuinely
+# executable or 'exec denied' would pass for the wrong reason -- a missing +x
+# bit rather than Landlock -- so the identical file is also exec'd under --rw,
+# where it must succeed. The same file, executable, on the same kernel: --rw
+# runs it and --rw-no-exec does not. Nothing a mode bit could explain.
+cp "$TRY" "$TD/rw/prog" && chmod 755 "$TD/rw/prog"
+RWX="--ro $ROOT/t --rw-no-exec $TD/rw"
+t 'rw-no-exec: write works'      0  -- "$J" $RWX -- "$TRY" write  "$TD/rw/file"
+t 'rw-no-exec: create works'     0  -- "$J" $RWX -- "$TRY" create "$TD/rw/made"
+t 'rw-no-exec: unlink works'     0  -- "$J" $RWX -- "$TRY" unlink "$TD/rw/made"
+t 'rw-no-exec: list works'       0  -- "$J" $RWX -- "$TRY" list   "$TD/rw"
+t 'rw-no-exec: exec denied'     13  -- "$J" $RWX -- "$TRY" exec   "$TD/rw/prog"
+t 'rw: that binary does exec'    2  -- "$J" $SB  -- "$TRY" exec   "$TD/rw/prog"
+
+# ===========================================================================
+# 9. the restriction is inherited by grandchildren
 # ===========================================================================
 t 'child of shell: denied'     13  -- "$J" $SBSH -- /bin/sh -c \
 	"exec $TRY read $TD/deny/secret"
@@ -152,7 +185,7 @@ t 'shell builtin redirect denied' 2 -- "$J" $SBSH -- /bin/sh -c \
 	|| ok 'shell could not create denied file'
 
 # ===========================================================================
-# 9. the child CANNOT drop the restriction  <- Landlock's whole promise
+# 10. the child CANNOT drop the restriction  <- Landlock's whole promise
 # ===========================================================================
 t 'cannot unsandbox self'      13  -- "$J" $SB -- "$TRY" escape "$TD/deny/secret"
 t 'cannot unsandbox via shell'  13 -- "$J" $SBSH -- /bin/sh -c \
@@ -163,7 +196,7 @@ printf '      --- escape attempt transcript ---\n'
 "$J" $SB -- "$TRY" escape "$TD/deny/secret" 2>&1 | sed 's/^/      | /'
 
 # ===========================================================================
-# 10. transparency: exit status and stdout pass through unchanged
+# 11. transparency: exit status and stdout pass through unchanged
 # ===========================================================================
 tout 'exit status 0 passes through'   0  'hi'   -- "$J" $SBSH -- /bin/sh -c 'echo hi'
 tout 'exit status 42 passes through' 42  ''     -- "$J" $SBSH -- /bin/sh -c 'exit 42'
@@ -182,7 +215,7 @@ _o=$(printf 'abc' | "$J" $SBSH -- /bin/cat 2>/dev/null)
 	|| bad 'signal death passes through' "got $?"
 
 # ===========================================================================
-# 11. jail fails closed on its own mistakes (125, distinct from any child)
+# 12. jail fails closed on its own mistakes (125, distinct from any child)
 # ===========================================================================
 t 'nonexistent --ro path'     125  -- "$J" --ro /nonexistent-xyz -- /bin/true
 t 'no command given'          125  -- "$J" --ro /usr
@@ -197,7 +230,7 @@ fi
 t 'no rules denies everything' 126  -- "$J" -- /bin/sh -c true
 
 # ===========================================================================
-# 12. the ABI degradation path, forced with JAIL_ABI_MAX
+# 13. the ABI degradation path, forced with JAIL_ABI_MAX
 # ===========================================================================
 # This is the part of any Landlock program most likely to be wrong, because on
 # a current kernel it never runs. Clamping down lets the kernel judge it too.

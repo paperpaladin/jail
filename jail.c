@@ -109,6 +109,33 @@ static inline int ll_restrict_self(int fd, uint32_t flags) {
 	LANDLOCK_ACCESS_FS_TRUNCATE |       \
 	LANDLOCK_ACCESS_FS_IOCTL_DEV)
 
+/*
+ * The grant flags, and exactly which rights each one means. A table rather
+ * than a chain of strcmp because the difference between these four is one or
+ * two bits, and those bits are the entire feature: seeing them in a column is
+ * the only way to review them.
+ */
+static const struct { const char *flag; uint64_t rights; } grant[] = {
+	{ "--ro", JAIL_FS_READ },
+	{ "--rw", JAIL_FS_READ | JAIL_FS_WRITE },
+	/*
+	 * Run it and read it, but do not enumerate it. Landlock gates the
+	 * operation rather than the path lookup, so dropping READ_DIR leaves
+	 * open() on a filename the process already knows working -- which is
+	 * the point: a compromised process can use /usr/bin/cc but cannot take
+	 * an inventory of what else is installed.
+	 */
+	{ "--rox", JAIL_FS_READ & ~LANDLOCK_ACCESS_FS_READ_DIR },
+	/*
+	 * Write it, but never run what was written. A scratch or download
+	 * directory, where the thing you are defending against is the process
+	 * fetching a payload and then executing it.
+	 */
+	{ "--rw-no-exec",
+	  (JAIL_FS_READ | JAIL_FS_WRITE) & ~LANDLOCK_ACCESS_FS_EXECUTE },
+};
+#define NGRANT ((int)(sizeof grant / sizeof *grant))
+
 /* The highest ABI this program knows how to use. */
 #define JAIL_ABI_KNOWN 5
 
@@ -121,20 +148,22 @@ static void die(const char *what) {
 
 static void usage(FILE *f) {
 	fprintf(f,
-	    "usage: %s [--ro PATH]... [--rw PATH]... [--strict] -- CMD [ARGS...]\n"
+	    "usage: %s [GRANT PATH]... [--strict] -- CMD [ARGS...]\n"
 	    "\n"
-	    "  --ro PATH   allow read and execute beneath PATH\n"
-	    "  --rw PATH   allow read, execute, write, create and delete beneath PATH\n"
-	    "  --strict    fail instead of degrading when the kernel's Landlock ABI\n"
-	    "              is older than this build knows about\n"
-	    "  --abi       print the kernel's Landlock ABI version and exit\n"
+	    "  --ro PATH          read and execute beneath PATH\n"
+	    "  --rw PATH          read, execute, write, create and delete\n"
+	    "  --rox PATH         read and execute, but no directory listing\n"
+	    "  --rw-no-exec PATH  read, write, create and delete, but no execute\n"
+	    "  --strict           fail instead of degrading when the kernel's\n"
+	    "                     Landlock ABI is older than this build knows\n"
+	    "  --abi              print the kernel's Landlock ABI version and exit\n"
 	    "\n"
 	    "env JAIL_ABI_MAX=N pretends the kernel's ABI is at most N (clamps\n"
 	    "down only) so the degradation path can be tested on a new kernel.\n"
 	    "\n"
 	    "Anything not granted is denied: the kernel returns EACCES. The\n"
 	    "restriction is inherited by all descendants and cannot be removed.\n"
-	    "CMD must itself live under an --ro/--rw path, as must its shared\n"
+	    "CMD must itself live under a granted path, as must its shared\n"
 	    "libraries and the dynamic loader.\n",
 	    prog);
 }
@@ -189,7 +218,7 @@ int main(int argc, char **argv) {
 	/* Parsed rules, in order. shortcut: fixed cap, grow to a realloc'd
 	 * array if anyone ever needs more than 64 path rules. */
 	struct { const char *path; uint64_t rights; } rule[64];
-	int nrule = 0, strict = 0, i, cmd;
+	int nrule = 0, strict = 0, i, g, cmd;
 	int abi, ruleset;
 	uint64_t handled, mask;
 	struct landlock_ruleset_attr attr = {0};
@@ -213,7 +242,9 @@ int main(int argc, char **argv) {
 			printf("%d\n", abi);
 			return 0;
 		}
-		if (!strcmp(argv[i], "--ro") || !strcmp(argv[i], "--rw")) {
+		for (g = 0; g < NGRANT && strcmp(argv[i], grant[g].flag); g++)
+			;
+		if (g < NGRANT) {
 			if (i + 1 >= argc) {
 				fprintf(stderr, "%s: %s needs a PATH\n", prog,
 				    argv[i]);
@@ -223,8 +254,7 @@ int main(int argc, char **argv) {
 				fprintf(stderr, "%s: too many path rules\n", prog);
 				return 125;
 			}
-			rule[nrule].rights = (argv[i][3] == 'w')
-			    ? (JAIL_FS_READ | JAIL_FS_WRITE) : JAIL_FS_READ;
+			rule[nrule].rights = grant[g].rights;
 			rule[nrule].path = argv[++i];
 			nrule++;
 			continue;

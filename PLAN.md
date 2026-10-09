@@ -2,7 +2,8 @@
 
 ## Contract
 
-`jail [--ro PATH]... [--rw PATH]... [--strict] -- CMD [ARGS...]`
+`jail [GRANT PATH]... [--strict] -- CMD [ARGS...]`, where GRANT is one of
+`--ro`, `--rw`, `--rox` or `--rw-no-exec`.
 
 Run `CMD` such that, for the whole process tree it roots, the only filesystem
 paths it can read or execute are those beneath an `--ro` or `--rw` argument,
@@ -162,10 +163,18 @@ documented below.
 
 ### Milestone 1 -- close the filesystem gaps
 
-- [ ] `--rox PATH` (read + execute, no directory listing) and `--rw-no-exec`.
+- [x] `--rox PATH` (read + execute, no directory listing) and `--rw-no-exec`.
       why: "can run it but cannot enumerate it" and "can write but not run
       what it wrote" are the two access shapes people actually ask for, and
       both are single-bit changes to an existing mask.
+      done: the four grants now live in one table, because the whole feature
+      is which bit each one drops and that is only reviewable in a column.
+      Ten kernel-verified assertions. The `--rw-no-exec` exec denial would
+      have passed for the wrong reason -- a missing +x bit rather than
+      Landlock -- so the same file is also exec'd under `--rw`, where it must
+      succeed. Both flags got a "what this does not buy you" entry in the
+      README: `--rox` is not secrecy, and `--rw-no-exec` does nothing about an
+      interpreter already inside the allowlist.
 - [ ] Explicit `--deny PATH` that shadows a broader grant.
       why: `--ro /home --deny /home/me/.ssh` is the common request. Landlock
       has no deny rules, so this must be done by granting the siblings; doing
