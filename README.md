@@ -133,7 +133,7 @@ ok    ABI1: --strict refuses
 ok    ABI1: truncate NOT gated
 ok    ABI1: warns on stderr
 
-60 passed, 0 failed, 0 skipped
+61 passed, 0 failed, 0 skipped
 ```
 
 The escape transcript is the interesting one. A child under `jail` tries to
@@ -219,7 +219,9 @@ Honestly:
   later inside an allowed directory cannot be used to escape (the *target* is
   what gets checked at open time), but it is worth knowing which inode you
   actually granted.
-- **No 64-rule-plus support.** Hard cap of 64 path rules of any kind.
+- **No limit worth naming on path rules**, but every rule costs one open file
+  descriptor at install time, so a `--deny` under a directory with tens of
+  thousands of entries will meet `RLIMIT_NOFILE` rather than a check of ours.
 - **Cannot run under valgrind.** valgrind does not implement syscall 444, so
   it returns ENOSYS and `jail` correctly refuses to run unsandboxed. The
   refusal is the right behaviour; it just makes `valgrind jail ...` useless.

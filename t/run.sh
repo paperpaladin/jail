@@ -229,6 +229,15 @@ fi
 # Zero rules means zero access -- the degenerate case must still be coherent.
 t 'no rules denies everything' 126  -- "$J" -- /bin/sh -c true
 
+# The rule array used to be a fixed 64 with a refusal past it, which was fine
+# while every rule came from a flag someone typed. 200 of them must work now,
+# because --deny expands one flag into one rule per sibling and a directory
+# with a few hundred entries is ordinary.
+many=""
+n=0
+while [ $n -lt 200 ]; do many="$many --ro $ROOT/t"; n=$((n + 1)); done
+t '200 path rules are accepted'  0  -- "$J" $many -- "$TRY" read "$ROOT/t/try.c"
+
 # ===========================================================================
 # 13. the ABI degradation path, forced with JAIL_ABI_MAX
 # ===========================================================================

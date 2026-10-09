@@ -184,6 +184,41 @@ static uint64_t abi_mask(int abi) {
 	return m;
 }
 
+/*
+ * The parsed rules, grown on demand.
+ *
+ * This was a fixed array of 64 with a "too many path rules" refusal, which was
+ * fine while every rule came from a flag the user typed. It stops being fine
+ * the moment one flag can expand into many: --deny has to be implemented by
+ * granting siblings, because Landlock has no way to subtract a right, and a
+ * single --deny under a directory with a few hundred entries produces a few
+ * hundred rules.
+ *
+ * Doubling from 16. The kernel has no limit on rules per ruleset worth
+ * worrying about here; the real ceiling is one open file descriptor per rule
+ * at install time, and those are closed as we go.
+ */
+typedef struct { const char *path; uint64_t rights; } Rule;
+
+static Rule *rules;
+static int nrule, rulecap;
+
+static void rule_add(const char *path, uint64_t rights) {
+	if (nrule == rulecap) {
+		rulecap = rulecap ? rulecap * 2 : 16;
+		Rule *p = realloc(rules, (size_t)rulecap * sizeof *p);
+		if (!p) {
+			fprintf(stderr, "%s: out of memory for %d path rules\n",
+			        prog, rulecap);
+			exit(125);
+		}
+		rules = p;
+	}
+	rules[nrule].path = path;
+	rules[nrule].rights = rights;
+	nrule++;
+}
+
 /* Grant `rights` beneath `path`, clamped to what makes sense for its type. */
 static void add_path(int ruleset, const char *path, uint64_t rights) {
 	struct landlock_path_beneath_attr pb = {0};
@@ -217,8 +252,7 @@ static void add_path(int ruleset, const char *path, uint64_t rights) {
 int main(int argc, char **argv) {
 	/* Parsed rules, in order. shortcut: fixed cap, grow to a realloc'd
 	 * array if anyone ever needs more than 64 path rules. */
-	struct { const char *path; uint64_t rights; } rule[64];
-	int nrule = 0, strict = 0, i, g, cmd;
+	int strict = 0, i, g, cmd;
 	int abi, ruleset;
 	uint64_t handled, mask;
 	struct landlock_ruleset_attr attr = {0};
@@ -250,13 +284,7 @@ int main(int argc, char **argv) {
 				    argv[i]);
 				return 125;
 			}
-			if (nrule == (int)(sizeof rule / sizeof *rule)) {
-				fprintf(stderr, "%s: too many path rules\n", prog);
-				return 125;
-			}
-			rule[nrule].rights = grant[g].rights;
-			rule[nrule].path = argv[++i];
-			nrule++;
+			rule_add(argv[++i], grant[g].rights);
 			continue;
 		}
 		fprintf(stderr, "%s: unknown option: %s\n", prog, argv[i]);
@@ -345,7 +373,7 @@ int main(int argc, char **argv) {
 	if (ruleset < 0) die("landlock_create_ruleset");
 
 	for (i = 0; i < nrule; i++)
-		add_path(ruleset, rule[i].path, rule[i].rights & mask);
+		add_path(ruleset, rules[i].path, rules[i].rights & mask);
 
 	/*
 	 * no_new_privs MUST be set before landlock_restrict_self, which

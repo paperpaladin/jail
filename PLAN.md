@@ -187,9 +187,13 @@ documented below.
       Landlock audit logging is available.
       why: `EACCES` with no indication of *which* path is the single worst part
       of debugging a Landlock policy, and the kernel now offers the answer.
-- [ ] Grow past the 64-rule cap with a realloc'd array.
+- [x] Grow past the 64-rule cap with a realloc'd array.
       why: the `shortcut:` note in `jail.c` names this; `--deny` expansion will
       blow through 64 rules on its own.
+      done: doubling from 16, out-of-memory exits 125 like every other failure
+      of ours. Done before `--deny` rather than with it, because the cap and
+      the expansion are separate claims and the test for the cap is one line
+      once it is gone: 200 rules must be accepted, which the old array refused.
 - [ ] Test the real ABI floor in CI against 5.13, 5.15 and 6.1 kernels.
       why: `JAIL_ABI_MAX` simulates the masking logic, not the kernel. Only an
       old kernel proves old-kernel behaviour, and this is the one honesty gap
