@@ -179,6 +179,10 @@ confinement test as **skipped**. It never reports a pass it did not earn.
 - `--deny PATH` withholds a subtree from a broader grant above it:
   `--ro /home --deny /home/me/.ssh`. Landlock has no deny rule, so see below
   for how this is done and what it costs.
+- `--strict` fails instead of degrading when the kernel's Landlock ABI is
+  older than this build knows about, rather than silently enforcing less.
+- `--abi` prints the kernel's Landlock ABI version and exits. Both are in the
+  binary's own `--help` and were missing from this list.
 - Paths may be single files, not just directories.
 - Inherited by all descendants, across `fork` and `exec`, forever.
 - Irrevocable by the sandboxed process.
