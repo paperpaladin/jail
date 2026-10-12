@@ -132,6 +132,23 @@ ok    ABI1: rw still writable
 ok    ABI1: --strict refuses
 ok    ABI1: truncate NOT gated
 ok    ABI1: warns on stderr
+ok    deny: the subtree is withheld
+ok    deny: but paths through it still resolve
+ok    deny: a sibling is still granted
+ok    deny: one file, not a directory
+ok    deny: and rw siblings still work
+ok    deny: a symlink to it is denied too
+ok    deny: denying via the symlink works
+ok    deny: and via a ".." path
+ok    deny: a symlink to an ancestor terminates
+ok    deny: the split parent cannot be listed
+ok    deny: and expansion does not widen it
+ok    deny: outside every grant is refused
+ok    deny: a nonexistent path is refused
+ok    deny: with no argument is refused
+ok    no deny: a symlink out is not a grant
+ok    control: granted parent exposes it
+ok    200 path rules are accepted
 
 77 passed, 0 failed, 0 skipped
 ```
@@ -294,8 +311,8 @@ Honestly:
 
 ## Design
 
-One file, `jail.c`, 384 lines, over half of them comments explaining why the
-kernel insists on something.
+One file, `jail.c`, 596 lines, 242 of them comment-only -- 44% of the
+non-blank lines -- explaining why the kernel insists on something.
 
 ```
 parse args  ->  probe ABI  ->  mask rights to ABI  ->  create ruleset
