@@ -2,7 +2,7 @@
 
 ## Contract
 
-`jail [GRANT PATH]... [--strict] -- CMD [ARGS...]`, where GRANT is one of
+`jail [GRANT PATH]... [--strict]: CMD [ARGS...]`, where GRANT is one of
 `--ro`, `--rw`, `--rox` or `--rw-no-exec`.
 
 Run `CMD` such that, for the whole process tree it roots, the only filesystem
@@ -14,15 +14,15 @@ kernel with `EACCES`.
 `jail` is transparent otherwise: it `exec`s `CMD`, so the exit status, death by
 signal, and stdin/stdout/stderr are `CMD`'s own and are not mediated by us.
 Exit status `125` means `jail` itself failed and `CMD` never ran; `126`/`127`
-mean `CMD` could not be executed; anything else came from `CMD`.
+mean `CMD` could not be executed. Anything else came from `CMD`.
 
 `CMD`, its shared libraries, and the dynamic loader must themselves be inside
 the allowlist. Granting nothing denies everything, including exec.
 
 On a kernel whose Landlock ABI is older than this build knows, `jail` confines
 as much as that ABI permits and names the gap on stderr. `--strict` turns that
-into a refusal to run. If Landlock is absent entirely, `jail` exits `125`
-rather than running `CMD` unconfined.
+into a refusal to run. If Landlock is absent entirely, `jail` exits `125`,
+not running `CMD` unconfined.
 
 ## Hard invariant
 
@@ -32,11 +32,11 @@ its own restrictions.**
 Both halves are the kernel's to keep, not ours, and both are checked by
 observing real syscalls:
 
-1. No sequence of actions available to the sandboxed process -- including
+1. No sequence of actions available to the sandboxed process, including
    `fork`, `exec`, spawning a shell, spawning a shell from a shell, clearing
    `no_new_privs`, or building and applying a maximally permissive Landlock
-   ruleset of its own -- makes a non-granted path accessible. Landlock domains
-   only intersect; there is no syscall that removes one.
+   ruleset of its own, makes a non-granted path accessible. Landlock domains
+   only intersect. There is no syscall that removes one.
 2. The `125` / `126-127` / other split on exit status is never ambiguous:
    `jail` failing is always distinguishable from `CMD` failing, so a sandbox
    that did not get applied can never be mistaken for a command that ran.
@@ -50,32 +50,32 @@ the arguments asked for without saying so on stderr, and never at all under
 The kernel is the authority. Ranked by how much each would cost us to get
 wrong:
 
-1. **The child cannot drop the sandbox.** A probe clears `no_new_privs`, builds
-   a permissive ruleset granting `/`, calls `landlock_restrict_self` with it --
+1. The child cannot drop the sandbox. A probe clears `no_new_privs`, builds
+   a permissive ruleset granting `/`, calls `landlock_restrict_self` with it,
    and then still gets `EACCES` on a denied path. If this ever passes, the tool
    is worthless.
-2. **A path not in the allowlist is `EACCES`.** Not ENOENT, not EPERM, not
+2. A path not in the allowlist is `EACCES`. Not ENOENT, not EPERM, not
    "the open happened to fail". The probe reports errno numerically and the
    harness asserts on `13`.
-3. **Inheritance.** A shell under `jail` is denied; a shell spawned by that
+3. Inheritance. A shell under `jail` is denied; a shell spawned by that
    shell is denied; a shell's own `>` redirection into a denied directory
    fails and the file does not exist afterwards.
-4. **Read-only is read-only.** Write, create, unlink, mkdir and truncate
-   beneath an `--ro` path all fail with `EACCES` -- truncate only where the ABI
-   gates it, and the suite skips that assertion rather than lying when it does
+4. Read-only is read-only. Write, create, unlink, mkdir and truncate
+   beneath an `--ro` path all fail with `EACCES`, truncate only where the ABI
+   gates it, and the suite skips that assertion instead of lying when it does
    not.
-5. **Read-write actually works.** Write, create, unlink, mkdir, rmdir succeed,
+5. Read-write actually works. Write, create, unlink, mkdir, rmdir succeed,
    and the created file is observed gone from outside the sandbox afterwards.
-6. **Exec is gated too.** A binary outside the allowlist cannot be executed,
+6. Exec is gated too. A binary outside the allowlist cannot be executed,
    and the errno is `EACCES`.
-7. **Granularity.** Granting a single file does not grant its directory;
+7. Granularity. Granting a single file does not grant its directory;
    granting two subdirectories does not grant their common parent.
-8. **Transparency.** Exit `0`, exit `42`, death by `SIGTERM` (143), exact
+8. Transparency. Exit `0`, exit `42`, death by `SIGTERM` (143), exact
    stdout bytes, stderr not merged into stdout, stdin piped in and read back.
-9. **ABI degradation, driven for real.** `JAIL_ABI_MAX=1` forces the old-kernel
+9. ABI degradation, driven for real. `JAIL_ABI_MAX=1` forces the old-kernel
    path; confinement still holds, `--strict` refuses, the warning appears, and
-   the ABI-1 truncate gap is asserted to be *present* rather than papered over.
-10. **Fail-closed on our own mistakes.** Bad path, missing command, unknown
+   the ABI-1 truncate gap is asserted to be *present*, not papered over.
+10. Fail-closed on our own mistakes. Bad path, missing command, unknown
     option, missing `--ro` argument: all `125`, command never runs.
 
 If Landlock is unavailable the harness prints the kernel version and the two
@@ -98,7 +98,7 @@ skip is never dressed up as a pass.
 
 Eighteen commits, every one of which compiles. Granularity is for `git bisect`
 and `git revert`, so a commit that does not build is worse than no commit at
-all -- the one commit that fails its tests does so deliberately and is
+all: the one commit that fails its tests does so deliberately and is
 documented below.
 
 - [x] `Makefile`, `LICENSE`, `.gitignore`, and `jail.c` reduced to the Landlock
@@ -117,16 +117,16 @@ documented below.
       degradation warning, and ruleset creation.
       why: these four are one decision, not four. `handled_access_fs` cannot be
       chosen without knowing which bits the kernel will accept, and the kernel
-      rejects an unknown bit rather than ignoring it, so the mask and the
+      rejects an unknown bit instead of ignoring it, so the mask and the
       ruleset must land together or the intermediate state is incoherent.
 - [x] `add_path()`: one `path_beneath` rule per flag, `O_PATH`, per-file-type
       right clamping, fail-closed on a bad path.
       why: separable from ruleset creation and worth isolating, because the
-      two masks here are easy to confuse -- one clamps to the kernel's ABI,
+      two masks here are easy to confuse: one clamps to the kernel's ABI,
       the other clamps to what a non-directory can be granted. This commit is
       also where the command-index bug enters, by adding the second loop.
 - [x] `PR_SET_NO_NEW_PRIVS` followed by `landlock_restrict_self`.
-      why: the ordering is a kernel requirement rather than a preference and
+      why: the ordering is a kernel requirement, not a preference and
       deserves to be readable as its own change. This is the commit where the
       tool starts actually confining anything, and therefore the first commit
       where being wrong has consequences.
@@ -138,8 +138,8 @@ documented below.
       groups (allowed reads, denied reads). **Red: 0 passed, 8 failed.**
       why: this is the commit that found the bug, and it is left red on
       purpose. It builds, so `git bisect` still works through it; it fails,
-      so the history records that the oracle caught a real defect rather than
-      ratifying a working tool. Deleting that would be deleting the evidence.
+      so the history records that the oracle caught a real defect,
+      not ratifying a working tool. Deleting that would be deleting the evidence.
 - [x] Fix the command-index bug: the rule-installing loop reused the parse
       loop's index, so `jail` exec'd `--ro`. **Green: 8 passed.**
       why: kept adjacent to the red commit so the pair reads as one story and
@@ -161,7 +161,7 @@ documented below.
       kind of artifact from the contract and the forward plan, and someone
       reverting one rarely wants to revert the other.
 
-### Milestone 1 -- close the filesystem gaps
+### Milestone 1: close the filesystem gaps
 
 - [x] `--rox PATH` (read + execute, no directory listing) and `--rw-no-exec`.
       why: "can run it but cannot enumerate it" and "can write but not run
@@ -170,8 +170,8 @@ documented below.
       done: the four grants now live in one table, because the whole feature
       is which bit each one drops and that is only reviewable in a column.
       Ten kernel-verified assertions. The `--rw-no-exec` exec denial would
-      have passed for the wrong reason -- a missing +x bit rather than
-      Landlock -- so the same file is also exec'd under `--rw`, where it must
+      have passed for the wrong reason: a missing +x bit,
+      not Landlock, so the same file is also exec'd under `--rw`, where it must
       succeed. Both flags got a "what this does not buy you" entry in the
       README: `--rox` is not secrecy, and `--rw-no-exec` does nothing about an
       interpreter already inside the allowlist.
@@ -179,12 +179,12 @@ documented below.
       why: `--ro /home --deny /home/me/.ssh` is the common request. Landlock
       has no deny rules, so this must be done by granting the siblings; doing
       that correctly by hand is exactly the tedium worth hiding.
-      done: and "has no deny rules" was measured rather than assumed -- a rule
+      done: and "has no deny rules" was measured, not assumed: a rule
       with allowed_access 0 is refused with ENOMSG, and rules in one ruleset
-      are additive rather than shadowed by depth, so there is no subtraction at
+      are additive, not shadowed by depth, so there is no subtraction at
       any depth. 16 assertions. Three symlink attacks all worked against the
       first version: a sibling link into the denied subtree, the same in
-      reverse via `--deny` on the link, and -- the serious one -- a link
+      reverse via `--deny` on the link, and: the serious one: a link
       pointing out of the grant, where granting it would have made the sandbox
       WIDER with the deny than without it. Children are now canonicalised and
       only considered when strictly inside the directory being split, which
@@ -201,7 +201,7 @@ documented below.
       why: the `shortcut:` note in `jail.c` names this; `--deny` expansion will
       blow through 64 rules on its own.
       done: doubling from 16, out-of-memory exits 125 like every other failure
-      of ours. Done before `--deny` rather than with it, because the cap and
+      of ours. Done before `--deny`, not with it, because the cap and
       the expansion are separate claims and the test for the cap is one line
       once it is gone: 200 rules must be accepted, which the old array refused.
 - [ ] Test the real ABI floor in CI against 5.13, 5.15 and 6.1 kernels.
@@ -209,7 +209,7 @@ documented below.
       old kernel proves old-kernel behaviour, and this is the one honesty gap
       the current suite cannot close by itself.
 
-### Milestone 2 -- beyond the filesystem
+### Milestone 2: beyond the filesystem
 
 - [ ] `--allow-tcp-bind PORT` / `--allow-tcp-connect PORT` via
       `LANDLOCK_RULE_NET_PORT` (ABI 4+).
