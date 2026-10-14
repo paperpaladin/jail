@@ -207,7 +207,7 @@ than assumed. Two facts, measured on ABI 10:
 So `--deny` works by never granting anything that encloses the denied path. It
 walks down from the grant and grants each level's *other* children
 individually. The path to the denied subtree is simply never granted. One flag
-becomes one rule per sibling, which is why the 64-rule cap had to go first.
+becomes one rule per sibling, so the 64-rule cap had to go first.
 
 Every child is canonicalised with `realpath` before it is considered, and only
 children whose canonical path lies **strictly inside** the directory being
@@ -331,7 +331,7 @@ property of the design. No code here implements it.
 
 `no_new_privs` before `landlock_restrict_self`. Not an ordering
 preference: `restrict_self` returns EPERM without it, unless you hold
-`CAP_SYS_ADMIN`, which is exactly what we are avoiding. The reason the kernel
+`CAP_SYS_ADMIN`, the very thing being avoided. The reason the kernel
 insists: a sandboxed process that could `exec` a setuid-root binary would get
 privileges it could use to act outside its domain, and Landlock's security
 claim ("an unprivileged process can safely restrict itself") would be false.
