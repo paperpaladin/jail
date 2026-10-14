@@ -340,7 +340,7 @@ claim ("an unprivileged process can safely restrict itself") would be false.
 `handled_access_fs` is masked to the detected ABI. The kernel rejects a
 ruleset naming an unknown access right instead of ignoring it, so that a
 program can never believe it sandboxed something the kernel did not enforce.
-The cost is that the caller must do the version arithmetic. Best effort is the
+Its cost is that the caller must do the version arithmetic. Best effort is the
 default, because refusing to run on a 5.15 LTS kernel helps nobody; `--strict`
 is there for when a weaker sandbox is worse than no run at all.
 
