@@ -287,7 +287,7 @@ Honestly:
   the same and the reason is different.
 - `--deny` enumerates at startup. A directory whose contents change
   between `jail` reading it and the command running is a race. An entry created
-  afterwards was never granted, so it is inaccessible, not exposed. The
+  afterwards was never granted, so it is inaccessible and nothing leaks. The
   safe direction, and still a surprise.
 - `--rox` is not secrecy. It stops enumeration instead of reading. Anything whose
   name can be guessed or is compiled into the attacker's payload is still
@@ -295,7 +295,7 @@ Honestly:
   confidential.
 - `/proc` is not special-cased. If you `--ro /proc` you have granted a
   great deal. If you do not, some tools will simply break.
-- Symlinks are resolved when the rule is added, not when the command runs.
+- Symlinks are resolved when the rule is added, before the command ever runs.
   `--ro /lib` on a merged-`/usr` system grants `/usr/lib`. A symlink created
   later inside an allowed directory cannot be used to escape (the *target* is
   what gets checked at open time), but it is worth knowing which inode you
