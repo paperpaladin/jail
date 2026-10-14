@@ -237,7 +237,7 @@ The suite asserts that, because it is surprising enough to be mistaken for a
 bug.
 
 A `--deny` that falls inside no grant is refused, because it denies
-nothing and is almost always a typo. Denies are global: one applies to every
+nothing and is almost always a typo. Denies are global. One applies to every
 grant it falls inside, wherever it sits on the command line.
 
 ## What does not work
@@ -286,7 +286,7 @@ Honestly:
   With one, the symlink is additionally not granted itself. The net effect is
   the same and the reason is different.
 - `--deny` enumerates at startup. A directory whose contents change
-  between `jail` reading it and the command running is a race: an entry created
+  between `jail` reading it and the command running is a race. An entry created
   afterwards was never granted, so it is inaccessible, not exposed. The
   safe direction, and still a surprise.
 - `--rox` is not secrecy. It stops enumeration instead of reading. Anything whose

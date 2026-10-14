@@ -98,7 +98,7 @@ skip is never dressed up as a pass.
 
 Eighteen commits, every one of which compiles. Granularity is for `git bisect`
 and `git revert`, so a commit that does not build is worse than no commit at
-all: the one commit that fails its tests does so deliberately and is
+all. The one commit that fails its tests does so deliberately and is
 documented below.
 
 - [x] `Makefile`, `LICENSE`, `.gitignore`, and `jail.c` reduced to the Landlock
