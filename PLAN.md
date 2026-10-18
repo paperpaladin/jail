@@ -189,10 +189,25 @@ documented below.
       WIDER with the deny than without it. Children are now canonicalised and
       only considered when strictly inside the directory being split, which
       also makes an ancestor symlink terminate.
-- [ ] Resolve `CMD` through `PATH` *before* restricting, and auto-grant the
+- [x] Resolve `CMD` through `PATH` *before* restricting, and auto-grant the
       resolved binary, its interpreter, and `ldd`'s output, behind `--auto`.
       why: "the command must be in its own allowlist" is the single biggest
       usability cliff, and every new user falls off it once.
+      done: three grants, each a single file and never a directory, each
+      printed on stderr. The rights differ by entry and that is the whole
+      minimality claim: the binary and the loader are opened with FMODE_EXEC
+      so they need EXECUTE, a library is opened O_RDONLY and mmap'd and
+      Landlock has no mmap hook, so it gets READ_FILE and nothing else. The
+      kernel proves both directions, including that execve of libc.so.6 is
+      still EACCES while the same execve succeeds unconfined. 24 assertions.
+      Resolution order has a second oracle, because it is glibc's answer and
+      not the kernel's: eleven cases run the same PATH and cwd through env(1)
+      and through jail and must agree. Slash-means-no-lookup, empty element
+      means cwd, non-executable and directory matches are skipped rather than
+      ending the search, and unset PATH is confstr(_CS_PATH) and not "". The
+      ENOEXEC-to-/bin/sh fallback is refused on purpose and that refusal is
+      asserted, which is also the only test that catches exec'ing the
+      resolved path rather than the typed name.
 - [ ] Report the denied path on failure by parsing `dmesg`/audit when ABI 7+
       Landlock audit logging is available.
       why: `EACCES` with no indication of *which* path is the single worst part

@@ -24,6 +24,7 @@
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /*
@@ -157,6 +158,8 @@ static void usage(FILE *f) {
 	    "  --rox PATH         read and execute, but no directory listing\n"
 	    "  --rw-no-exec PATH  read, write, create and delete, but no execute\n"
 	    "  --deny PATH        withhold PATH from a broader grant above it\n"
+	    "  --auto             resolve CMD through PATH and grant it, its\n"
+	    "                     loader and its libraries (named on stderr)\n"
 	    "  --strict           fail instead of degrading when the kernel's\n"
 	    "                     Landlock ABI is older than this build knows\n"
 	    "  --abi              print the kernel's Landlock ABI version and exit\n"
@@ -351,6 +354,153 @@ static void expand(const char *path, uint64_t rights) {
 	closedir(d);
 }
 
+/*
+ * --auto: resolve CMD the way execvp(3) will, then grant exactly what running
+ * it needs and nothing else.
+ *
+ * "The command has to be inside its own allowlist" is the cliff every new user
+ * of this tool falls off once, and the fix is mechanical: the binary, the
+ * dynamic loader named in its PT_INTERP, and the shared objects those pull in.
+ * Auto-granting is in direct tension with the point of the program, so the
+ * rule here is minimum and loud. Each path is granted on its own, never the
+ * directory holding it, and each one is printed on stderr before the command
+ * runs.
+ *
+ * The split of rights is not cosmetic. The binary and the loader are opened by
+ * the kernel with FMODE_EXEC, which Landlock turns into a demand for EXECUTE,
+ * so they need it. A shared library is opened O_RDONLY and mmap'd, and
+ * Landlock has no mmap hook, so READ_FILE alone is enough for it. The suite
+ * asserts both halves: the command runs, and execve of libc.so.6 is still
+ * EACCES.
+ */
+static void auto_add(char *path, uint64_t rights) {
+	rule_add(path, rights);
+	fprintf(stderr, "%s: --auto: %s %s\n", prog,
+	        (rights & LANDLOCK_ACCESS_FS_EXECUTE) ? "exec+read" : "read",
+	        path);
+}
+
+/* Would execvp stop here? It tries execve and carries on past EACCES, ENOENT
+ * and ENOTDIR, so a directory or a file without +x is skipped rather than
+ * being the answer. We approximate the trial exec with stat + access, which
+ * differs only for a file we may exec but the kernel will not load. */
+static int runnable(const char *p) {
+	struct stat st;
+	return stat(p, &st) == 0 && S_ISREG(st.st_mode) && access(p, X_OK) == 0;
+}
+
+/*
+ * What execvp(3) actually does, reproduced, because granting one path and then
+ * running another would be worse than not resolving at all:
+ *
+ *   - a name containing a '/' is used as given and PATH is never consulted;
+ *   - an unset PATH is not an empty PATH: glibc falls back to
+ *     confstr(_CS_PATH) ("/bin:/usr/bin"), where empty would mean the current
+ *     directory, which is both wrong and the dangerous direction to be wrong in;
+ *   - an empty element means the current directory, so ":/usr/bin",
+ *     "/usr/bin:" and "a::b" each contain one;
+ *   - a match that cannot be executed does not end the search.
+ *
+ * Returns the path to grant and run, or NULL with *status set to the exit
+ * status to use: 127 nothing of that name, 126 found but not executable.
+ */
+static char *path_lookup(const char *cmd, int *status) {
+	char buf[PATH_MAX], cs[PATH_MAX];
+	const char *path, *p;
+	int denied = 0;
+
+	if (strchr(cmd, '/')) {
+		if (runnable(cmd)) { *status = 0; return xstrdup(cmd); }
+		*status = access(cmd, F_OK) == 0 ? 126 : 127;
+		return NULL;
+	}
+
+	path = getenv("PATH");
+	if (!path) {
+		size_t n = confstr(_CS_PATH, cs, sizeof cs);
+		path = (n > 0 && n <= sizeof cs) ? cs : "";
+	}
+
+	for (p = path;;) {
+		const char *end = strchrnul(p, ':');
+		int n = (end == p)
+		    ? snprintf(buf, sizeof buf, "%s", cmd)
+		    : snprintf(buf, sizeof buf, "%.*s/%s", (int)(end - p), p, cmd);
+		if (n > 0 && n < (int)sizeof buf) {
+			if (runnable(buf)) { *status = 0; return xstrdup(buf); }
+			if (access(buf, F_OK) == 0) denied = 1;
+		}
+		if (!*end) break;
+		p = end + 1;
+	}
+	*status = denied ? 126 : 127;
+	return NULL;
+}
+
+/*
+ * The shared libraries, from ldd, which is the authority on the question: it
+ * asks the program's own loader instead of guessing, and a hand-rolled walk of
+ * DT_NEEDED, ld.so.cache, RPATH and RUNPATH would get the search order subtly
+ * wrong and grant a path the loader does not use while the one it does use
+ * stayed denied.
+ *
+ * fork+exec rather than popen: a path with a space or a quote in it would
+ * otherwise have to survive /bin/sh.
+ *
+ * Two things this is not. ldd on a binary you do not trust can run it, so
+ * --auto is a convenience for commands you chose, not armour against one you
+ * did not. And nothing is assumed on ldd's behalf: if it fails or is missing
+ * we say so and grant only what it listed, so the command fails at exec
+ * instead of anything being widened to cover the doubt.
+ */
+static void auto_libs(const char *bin, uint64_t xrights) {
+	int fd[2], st = 0;
+	pid_t pid;
+	FILE *f;
+	char line[PATH_MAX + 128];
+	int got = 0;
+
+	if (pipe(fd) < 0) die("pipe");
+	if ((pid = fork()) < 0) die("fork");
+	if (pid == 0) {
+		int null = open("/dev/null", O_WRONLY);
+		dup2(fd[1], STDOUT_FILENO);
+		if (null >= 0) dup2(null, STDERR_FILENO);
+		close(fd[0]);
+		close(fd[1]);
+		execlp("ldd", "ldd", "--", bin, (char *)NULL);
+		_exit(127);
+	}
+	close(fd[1]);
+	if (!(f = fdopen(fd[0], "r"))) die("fdopen");
+	while (fgets(line, sizeof line, f)) {
+		char *arrow = strstr(line, " => ");
+		char *p = arrow ? arrow + 4 : line + strspn(line, " \t");
+		char *addr;
+		size_t n;
+		/* Everything ldd prints that is not a resolved path: the vdso,
+		 * which has no file at all, "not found", and the "statically
+		 * linked" / "not a dynamic executable" lines for a program that
+		 * needs no loader. None of them name a thing to grant. */
+		if (*p != '/') continue;
+		if ((addr = strstr(p, " (0x"))) *addr = 0;
+		n = strlen(p);
+		while (n && (p[n - 1] == '\n' || p[n - 1] == ' ')) p[--n] = 0;
+		if (!n) continue;
+		/* A line with no "=>" is the loader itself. */
+		auto_add(canon(p, "--auto"),
+		         arrow ? LANDLOCK_ACCESS_FS_READ_FILE : xrights);
+		got++;
+	}
+	fclose(f);
+	while (waitpid(pid, &st, 0) < 0 && errno == EINTR)
+		;
+	if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+		fprintf(stderr, "%s: --auto: ldd exited %d for %s; granted the "
+		        "%d path(s) it listed\n", prog,
+		        WIFEXITED(st) ? WEXITSTATUS(st) : -1, bin, got);
+}
+
 /* Grant `rights` beneath `path`, clamped to what makes sense for its type. */
 static void add_path(int ruleset, const char *path, uint64_t rights) {
 	struct landlock_path_beneath_attr pb = {0};
@@ -382,9 +532,8 @@ static void add_path(int ruleset, const char *path, uint64_t rights) {
 }
 
 int main(int argc, char **argv) {
-	/* Parsed rules, in order. shortcut: fixed cap, grow to a realloc'd
-	 * array if anyone ever needs more than 64 path rules. */
-	int strict = 0, i, g, cmd;
+	int strict = 0, autog = 0, i, g, cmd;
+	char *cmdpath = NULL;
 	int abi, ruleset;
 	uint64_t handled, mask;
 	struct landlock_ruleset_attr attr = {0};
@@ -398,6 +547,7 @@ int main(int argc, char **argv) {
 			return 0;
 		}
 		if (!strcmp(argv[i], "--strict")) { strict = 1; continue; }
+		if (!strcmp(argv[i], "--auto")) { autog = 1; continue; }
 		if (!strcmp(argv[i], "--abi")) {
 			abi = ll_create_ruleset(NULL, 0,
 			    LANDLOCK_CREATE_RULESET_VERSION);
@@ -443,6 +593,29 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "%s: no command given\n", prog);
 		usage(stderr);
 		return 125;
+	}
+
+	/*
+	 * Resolution happens here: before the ruleset exists, because the whole
+	 * point is to know which paths the grant must name, and before anything
+	 * is enforced, because PATH lookup is a series of stat() calls that the
+	 * sandbox we are about to install would deny.
+	 */
+	if (autog) {
+		int st;
+		char *p = path_lookup(argv[cmd], &st);
+		if (!p) {
+			fprintf(stderr, "%s: --auto: %s: %s\n", prog, argv[cmd],
+			    st == 127 ? "not found in PATH" : "not executable");
+			return st;
+		}
+		/* Canonical, so the inode we grant is the inode we exec: a
+		 * symlinked name like /bin/sh resolves once, here, rather than
+		 * being resolved again by execvp against a different answer. */
+		cmdpath = canon(p, "--auto");
+		free(p);
+		auto_add(cmdpath, JAIL_FS_READ & JAIL_FS_FILE_OK);
+		auto_libs(cmdpath, JAIL_FS_READ & JAIL_FS_FILE_OK);
 	}
 
 	/*
@@ -589,7 +762,8 @@ int main(int argc, char **argv) {
 	 * working -- Landlock checks at open() time, not on read()/write().
 	 * That is the whole transparency story, and it costs zero code.
 	 */
-	execvp(argv[cmd], &argv[cmd]);
+	if (cmdpath) execv(cmdpath, &argv[cmd]);
+	else execvp(argv[cmd], &argv[cmd]);
 	fprintf(stderr, "%s: exec %s: %s\n", prog, argv[cmd], strerror(errno));
 	/* Shell convention, so callers can tell exec failure from a real exit. */
 	return errno == ENOENT ? 127 : 126;

@@ -239,6 +239,164 @@ t 'deny: a nonexistent path is refused'  125 -- "$J" $DENYSB --deny "$TD/nope" -
 t 'deny: with no argument is refused'    125 -- "$J" $DENYSB --deny
 
 # ===========================================================================
+# 8c. --auto: resolve CMD through PATH first, then grant what running it needs
+# ===========================================================================
+# Two oracles here, for two different questions.
+#
+# WHICH FILE the lookup picks is glibc's business: env(1) is a thin wrapper
+# around execvp(3), so every case below runs the same PATH and the same cwd
+# through env and through `jail --auto` and demands that they agree -- and that
+# both agree with the answer written here, so two implementations going wrong
+# the same way cannot pass.
+#
+# WHAT IS REACHABLE afterwards is the kernel's, as everywhere else in this file.
+# --auto grants paths that the user did not type, which is in tension with the
+# whole point of the tool, so every grant is asserted in both directions: the
+# command runs, AND the things next to what was granted are still denied.
+ENVB=$(command -v env 2>/dev/null)
+mkdir -p "$TD/pa" "$TD/pb" "$TD/noexec" "$TD/isdir/mycmd" "$TD/empty"
+for d in pa pb noexec; do printf '#!/bin/sh\necho %s\n' "$d" > "$TD/$d/mycmd"; done
+chmod 755 "$TD/pa/mycmd" "$TD/pb/mycmd"
+chmod 644 "$TD/noexec/mycmd"
+
+# vp NAME WANT_STATUS WANT_STDOUT PATH CWD CMD
+vp() {
+	_n=$1; _w=$2; _e=$3; _p=$4; _c=$5; _cmd=$6
+	_eo=$(cd "$_c" && PATH="$_p" "$ENVB" "$_cmd" 2>/dev/null); _es=$?
+	_jo=$(cd "$_c" && PATH="$_p" "$J" --auto --ro /usr --ro "$TD" \
+	      -- "$_cmd" 2>/dev/null); _js=$?
+	if [ "$_es" = "$_w" ] && [ "$_eo" = "$_e" ] &&
+	   [ "$_js" = "$_w" ] && [ "$_jo" = "$_e" ]; then ok "$_n"
+	else bad "$_n" "want $_w [$_e]" "execvp(env) gave $_es [$_eo]" \
+	              "jail --auto gave $_js [$_jo]"; fi
+}
+
+if [ -z "$ENVB" ]; then
+	for n in 'auto: found through PATH' 'auto: first match wins' \
+	         'auto: non-executable is skipped' 'auto: a directory is skipped' \
+	         'auto: a slash means no PATH lookup' 'auto: ./missing is 127' \
+	         'auto: empty element is the cwd' 'auto: trailing empty element too' \
+	         'auto: no such name is 127' 'auto: found but not executable is 126' \
+	         'auto: refuses the ENOEXEC-to-sh fallback' \
+	         'auto: unset PATH is not the cwd'; do
+		skipt "$n" "env(1) not installed, no execvp to compare against"
+	done
+else
+vp 'auto: found through PATH'          0 pa "$TD/pa"            /        mycmd
+vp 'auto: first match wins'            0 pa "$TD/pa:$TD/pb"     /        mycmd
+# A match that cannot be executed does not end the search: execvp tries it,
+# gets EACCES, remembers that and keeps walking the list.
+vp 'auto: non-executable is skipped'   0 pb "$TD/noexec:$TD/pb" /        mycmd
+vp 'auto: a directory is skipped'      0 pb "$TD/isdir:$TD/pb"  /        mycmd
+# A name containing a slash is never looked up in PATH. $TD/pa is first in
+# PATH and holds a mycmd, and the answer still has to be the one in the cwd.
+vp 'auto: a slash means no PATH lookup' 0 pb "$TD/pa"           "$TD/pb" ./mycmd
+vp 'auto: ./missing is 127'          127 ''  "$TD/pa"           "$TD/empty" ./mycmd
+# An empty element means the current directory, leading or trailing.
+vp 'auto: empty element is the cwd'    0 pb ":/nonexistent-xyz" "$TD/pb" mycmd
+vp 'auto: trailing empty element too'  0 pb "/nonexistent-xyz:" "$TD/pb" mycmd
+vp 'auto: no such name is 127'       127 ''  /nonexistent-xyz   /        mycmd
+vp 'auto: found but not executable is 126' 126 '' "$TD/noexec"  /        mycmd
+
+# The one execvp(3) behaviour --auto deliberately does NOT reproduce. A file
+# that is regular and executable but is not a valid executable makes execve
+# fail with ENOEXEC, and glibc answers that by re-running it through /bin/sh.
+# jail will not: pulling an interpreter into a sandbox the user did not ask
+# for it in is the one thing this flag must never do. Both halves are measured
+# rather than claimed -- env(1) runs the thing, jail refuses with 126 -- so if
+# --auto ever went back to execvp this would catch it.
+printf 'echo noshebang\n' > "$TD/pa/noshebang"
+chmod 755 "$TD/pa/noshebang"
+_eo=$(cd / && PATH="$TD/pa" "$ENVB" noshebang 2>/dev/null); _es=$?
+_jo=$(cd / && PATH="$TD/pa" "$J" --auto --ro /usr --ro "$TD" \
+      -- noshebang 2>/dev/null); _js=$?
+if [ "$_es" = 0 ] && [ "$_eo" = noshebang ] && [ "$_js" = 126 ] && [ -z "$_jo" ]
+then ok 'auto: refuses the ENOEXEC-to-sh fallback'
+else bad 'auto: refuses the ENOEXEC-to-sh fallback' \
+         "execvp(env) gave $_es [$_eo], jail --auto gave $_js [$_jo]"; fi
+
+# Unset is not empty. glibc falls back to confstr(_CS_PATH), and reading an
+# unset PATH as "" would search the current directory instead -- the wrong
+# answer, in the dangerous direction.
+_eo=$(cd "$TD/pb" && unset PATH && "$ENVB" mycmd 2>/dev/null); _es=$?
+_jo=$(cd "$TD/pb" && unset PATH && "$J" --auto --ro /usr --ro "$TD" \
+      -- mycmd 2>/dev/null); _js=$?
+if [ "$_es" = 127 ] && [ "$_js" = 127 ] && [ -z "$_eo$_jo" ]; then
+	ok 'auto: unset PATH is not the cwd'
+else
+	bad 'auto: unset PATH is not the cwd' \
+	    "execvp(env) gave $_es [$_eo], jail --auto gave $_js [$_jo]"
+fi
+fi
+
+# --- and now what it granted, judged by the kernel --------------------------
+# /bin/echo is dynamically linked, so this needs the binary, the loader and
+# libc, none of which are named on the command line.
+tout 'auto: a dynamic command runs'   0 hi -- "$J" --auto -- /bin/echo hi
+# The control. Without --auto the identical command cannot be exec'd at all,
+# so the test above is measuring the grant rather than a permissive kernel.
+t 'control: without --auto it cannot' 126 -- "$J" -- /bin/echo hi
+
+LIBC=$(ldd /bin/sh 2>/dev/null | sed -n 's/.* => \(\/[^ ]*\).*/\1/p' | head -1)
+if [ -z "$LIBC" ] || [ ! -e "$LIBC" ]; then
+	for n in 'auto: the library is readable' 'auto: the library is NOT executable' \
+	         'control: the library is executable at all' \
+	         'auto: the library directory is not listable' \
+	         'auto: /usr/bin is not listable' \
+	         'auto: a sibling binary cannot run' \
+	         'auto: /etc/passwd is still denied' \
+	         'auto: the grants are named on stderr'; do
+		skipt "$n" "ldd listed no library for /bin/sh"
+	done
+else
+# Everything below runs the probe under a shell that --auto brought in. The
+# probe is static and granted the ordinary way, so the only paths --auto is
+# responsible for are /bin/sh, its loader, and its libraries.
+AU="--auto --ro $ROOT/t"
+t 'auto: the library is readable'      0 -- "$J" $AU -- /bin/sh -c "$TRY read $LIBC"
+# Minimality, the half that is easy to skip. A library is opened O_RDONLY and
+# mmap'd, which Landlock does not gate, so --auto grants READ_FILE and not
+# EXECUTE. If it granted the same rights to libraries as to the binary, this
+# would be 0.
+t 'auto: the library is NOT executable' 13 -- "$J" $AU -- /bin/sh -c "$TRY exec $LIBC"
+# ...and that denial is Landlock's, not a missing mode bit: unconfined, the
+# same execve of the same file succeeds (glibc prints its banner and exits 0).
+t 'control: the library is executable at all' 0 -- "$TRY" exec "$LIBC"
+# The library was granted as a file. Its directory is where every other
+# library on the system lives, and it is not reachable.
+t 'auto: the library directory is not listable' 13 -- "$J" $AU -- /bin/sh -c \
+	"$TRY list $(dirname "$LIBC")"
+t 'auto: /usr/bin is not listable'     13 -- "$J" $AU -- /bin/sh -c "$TRY list /usr/bin"
+# The sharpest one: /bin/cat needs exactly the loader and libc that were just
+# granted, and it still cannot run, because the grant was of /bin/sh and not
+# of the directory it sits in.
+t 'auto: a sibling binary cannot run' 13 -- "$J" $AU -- /bin/sh -c \
+	"$TRY exec /bin/cat"
+t 'auto: /etc/passwd is still denied'  13 -- "$J" $AU -- /bin/sh -c "$TRY read /etc/passwd"
+
+# Auto-granting paths the user did not type is only acceptable if the user is
+# told, so the report is part of the contract and not decoration. This and the
+# ABI warning are the only places the suite reads what jail says.
+_rep=$("$J" --auto -- /bin/echo hi 2>&1 >/dev/null)
+_want1=$(readlink -f /bin/echo); _want2=$(readlink -f "$LIBC")
+case "$_rep" in
+*"$_want1"*) case "$_rep" in
+	*"$_want2"*) ok 'auto: the grants are named on stderr' ;;
+	*) bad 'auto: the grants are named on stderr' "no $_want2 in [$_rep]" ;;
+	esac ;;
+*) bad 'auto: the grants are named on stderr' "no $_want1 in [$_rep]" ;;
+esac
+fi
+
+# A static binary needs nothing but itself, and --auto works out that nothing
+# else has to be granted: the only reason this runs is that --auto resolved
+# $TRY and granted that one file.
+t 'auto: a static command needs only itself' 0 -- "$J" --auto --ro "$TD/ro" \
+	-- "$TRY" read "$TD/ro/file"
+t 'control: the same without --auto'       126 -- "$J" --ro "$TD/ro" \
+	-- "$TRY" read "$TD/ro/file"
+
+# ===========================================================================
 # 9. the restriction is inherited by grandchildren
 # ===========================================================================
 t 'child of shell: denied'     13  -- "$J" $SBSH -- /bin/sh -c \

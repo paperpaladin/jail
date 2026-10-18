@@ -43,9 +43,16 @@ PDF renderer, or anything else you half-trust, on any Linux you already have.
 
 ## The oracle
 
-The kernel is the authority. There is no mock, no stub, and nothing in the
-test suite that inspects `jail`'s internals or parses its output to decide
-whether a test passed.
+The kernel is the authority. There is no mock and no stub, and only three
+assertions in the whole suite read anything `jail` printed instead of asking
+the kernel: the ABI-1 degradation warning, the `--auto` grant report, and the
+`--auto` resolution cases. The first two are claims about a message, so a
+message is the only thing that can check them. The third has a different
+authority rather than no authority: *which* file a `PATH` lookup picks is
+glibc's business, not the kernel's, so each of those cases runs the same
+`PATH` and the same working directory through `env`(1), which is a thin
+wrapper around `execvp(3)`, and demands that `jail` and glibc agree with each
+other and with the answer written in the test.
 
 Every assertion is a real process running under `jail` that makes a real
 syscall, and the thing asserted is the kernel's own verdict. `t/try` is a
@@ -104,6 +111,46 @@ ok    rw-no-exec: unlink works
 ok    rw-no-exec: list works
 ok    rw-no-exec: exec denied
 ok    rw: that binary does exec
+ok    control: granted parent exposes it
+ok    deny: the subtree is withheld
+ok    deny: a sibling is still granted
+ok    deny: and rw siblings still work
+ok    deny: one file, not a directory
+ok    deny: a symlink to it is denied too
+ok    deny: denying via the symlink works
+ok    deny: and via a ".." path
+ok    no deny: a symlink out is not a grant
+ok    deny: and expansion does not widen it
+ok    deny: a symlink to an ancestor terminates
+ok    deny: the split parent cannot be listed
+ok    deny: but paths through it still resolve
+ok    deny: outside every grant is refused
+ok    deny: a nonexistent path is refused
+ok    deny: with no argument is refused
+ok    auto: found through PATH
+ok    auto: first match wins
+ok    auto: non-executable is skipped
+ok    auto: a directory is skipped
+ok    auto: a slash means no PATH lookup
+ok    auto: ./missing is 127
+ok    auto: empty element is the cwd
+ok    auto: trailing empty element too
+ok    auto: no such name is 127
+ok    auto: found but not executable is 126
+ok    auto: refuses the ENOEXEC-to-sh fallback
+ok    auto: unset PATH is not the cwd
+ok    auto: a dynamic command runs
+ok    control: without --auto it cannot
+ok    auto: the library is readable
+ok    auto: the library is NOT executable
+ok    control: the library is executable at all
+ok    auto: the library directory is not listable
+ok    auto: /usr/bin is not listable
+ok    auto: a sibling binary cannot run
+ok    auto: /etc/passwd is still denied
+ok    auto: the grants are named on stderr
+ok    auto: a static command needs only itself
+ok    control: the same without --auto
 ok    child of shell: denied
 ok    child of shell: allowed
 ok    grandchild of shell: denied
@@ -127,30 +174,14 @@ ok    unknown option
 ok    --ro with no argument
 ok    --strict accepted on new ABI
 ok    no rules denies everything
+ok    200 path rules are accepted
 ok    ABI1: still confines
 ok    ABI1: rw still writable
 ok    ABI1: --strict refuses
 ok    ABI1: truncate NOT gated
 ok    ABI1: warns on stderr
-ok    deny: the subtree is withheld
-ok    deny: but paths through it still resolve
-ok    deny: a sibling is still granted
-ok    deny: one file, not a directory
-ok    deny: and rw siblings still work
-ok    deny: a symlink to it is denied too
-ok    deny: denying via the symlink works
-ok    deny: and via a ".." path
-ok    deny: a symlink to an ancestor terminates
-ok    deny: the split parent cannot be listed
-ok    deny: and expansion does not widen it
-ok    deny: outside every grant is refused
-ok    deny: a nonexistent path is refused
-ok    deny: with no argument is refused
-ok    no deny: a symlink out is not a grant
-ok    control: granted parent exposes it
-ok    200 path rules are accepted
 
-77 passed, 0 failed, 0 skipped
+101 passed, 0 failed, 0 skipped
 ```
 
 The escape transcript is the interesting one. A child under `jail` tries to
@@ -177,6 +208,10 @@ confinement test as skipped. It never reports a pass it did not earn.
 - `--deny PATH` withholds a subtree from a broader grant above it:
   `--ro /home --deny /home/me/.ssh`. Landlock has no deny rule, so see below
   for how this is done and what it costs.
+- `--auto` resolves `CMD` through `PATH` before the sandbox is installed and
+  grants the three things needed to run it: the resolved binary, its dynamic
+  loader, and each shared library. Nothing else, and every one of them is
+  printed on stderr. See below for exactly what that is and what it is not.
 - `--strict` fails instead of degrading when the kernel's Landlock ABI is
   older than this build knows about, instead of silently enforcing less.
 - `--abi` prints the kernel's Landlock ABI version and exits. Both are in the
@@ -239,6 +274,82 @@ bug.
 A `--deny` that falls inside no grant is refused, because it denies
 nothing and is almost always a typo. Denies are global. One applies to every
 grant it falls inside, wherever it sits on the command line.
+
+## `--auto`
+
+The single biggest usability cliff in this tool is that `CMD` has to be inside
+its own allowlist, together with its loader and its libraries, and everyone
+falls off it once. `--auto` does that resolution before anything is enforced.
+
+Auto-granting is in direct tension with the point of the program, so this is
+the exhaustive list of what it grants, with the rights it grants:
+
+| what | rights | why |
+| --- | --- | --- |
+| the resolved `CMD` | `EXECUTE`, `READ_FILE` | `execve` opens it with `FMODE_EXEC`, which Landlock reads as a demand for both |
+| the dynamic loader (`PT_INTERP`) | `EXECUTE`, `READ_FILE` | the kernel opens it the same way, through `open_exec` |
+| each shared library `ldd` resolves | `READ_FILE` | the loader `open`s it `O_RDONLY` and `mmap`s it, and Landlock has no `mmap` hook |
+
+Each one is granted as a single file. No directory is ever granted, and the
+rights are per entry rather than one mask for the lot. The suite asserts the
+difference in both directions, because "the command ran" proves the grant was
+*sufficient* and says nothing about whether it was *minimal*:
+
+- the command runs, and without `--auto` the identical command cannot be
+  exec'd at all;
+- `libc.so.6` is readable, and `execve` of it is `EACCES` -- with the control
+  that the same `execve` of the same file succeeds unconfined, so the denial
+  is Landlock's and not a missing mode bit;
+- the directory the libraries live in cannot be listed, and neither can
+  `/usr/bin`;
+- `/bin/cat` cannot be exec'd even though it needs exactly the loader and the
+  libc that were just granted. The grant was of `/bin/sh`, not of the
+  directory it sits in.
+
+Every path is named on stderr before the command starts:
+
+```
+$ jail --auto -- /bin/echo hi
+jail: --auto: exec+read /usr/bin/echo
+jail: --auto: read /usr/lib/x86_64-linux-gnu/libc.so.6
+jail: --auto: exec+read /usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+hi
+```
+
+That report is part of the contract, not decoration: a sandbox that widens
+itself silently is worse than one that refuses.
+
+### Which `execvp` behaviours this reproduces
+
+Resolution order is observable, and guessing at it would mean granting one
+path and running another. These are reproduced, and each has a test that
+compares `jail --auto` against `env`(1):
+
+- a name containing a `/` is used as given and `PATH` is never consulted;
+- the first element that holds a regular, executable file wins;
+- a match that cannot be executed does **not** end the search: `execvp` tries
+  it, gets `EACCES`, remembers that, and keeps walking the list, so
+  `PATH=/noexec:/good` still runs `/good/cmd`. A directory of the right name
+  is skipped the same way;
+- an empty element means the current directory, leading, trailing or in the
+  middle;
+- an unset `PATH` is not an empty `PATH`: glibc falls back to
+  `confstr(_CS_PATH)`, which is `/bin:/usr/bin`. Reading it as empty would
+  search the current directory, which is both wrong and the dangerous
+  direction to be wrong in;
+- nothing of that name is `127`; found but not executable is `126`.
+
+One behaviour is deliberately **refused**. A file that is regular and
+executable but not a valid executable makes `execve` fail with `ENOEXEC`, and
+glibc answers that by re-running the file through `/bin/sh`. `jail --auto`
+does not: quietly pulling an interpreter into a sandbox the user did not ask
+to grant it in is the one thing this flag must never do. It exits `126` with
+`Exec format error`. The test measures both halves -- `env` runs the file,
+`jail` refuses -- so this cannot rot back into `execvp` unnoticed.
+
+The lookup approximates "try `execve` and keep going" with `stat` plus
+`access(X_OK)`. Across the eleven cases in the suite that is the same answer
+glibc gives, including the one where the candidate is a directory.
 
 ## What does not work
 
@@ -308,15 +419,44 @@ Honestly:
   refusal is the right behaviour. It just makes `valgrind jail ...` useless.
 - The command must be inside the allowlist, along with its shared
   libraries and the dynamic loader. `jail --rw /tmp, make` will fail to
-  exec. This is not a bug, but it surprises everyone once.
+  exec. This is not a bug, but it surprises everyone once. `--auto` is the
+  answer to it, and is opt-in rather than the default, because a flag that
+  grants paths nobody typed should be asked for.
+- `--auto` shells out to `ldd`, and inherits two things from it. If `ldd` is
+  missing or fails, `jail` says so on stderr and grants only what it did
+  list, so the command fails at exec rather than anything being widened to
+  cover the doubt. And `ldd` on a binary you do not trust can run it:
+  `--auto` is a convenience for commands you chose, not armour against one
+  you did not. Resolving `DT_NEEDED`, `ld.so.cache`, `RPATH` and `RUNPATH` by
+  hand would avoid that, and would also be a reimplementation of the loader's
+  search order, where being subtly wrong means granting a path the loader
+  does not use while the one it does use stays denied.
+- `--auto` grants nothing a program needs at *runtime*: no config, no data
+  files, no `/etc/resolv.conf`, no locale archive, no `/proc`, no plugins it
+  dlopens later. It grants what is needed to *start* the process, and a tool
+  that needs more still needs `--ro` and `--rw` for it.
+- `--auto` does not read a `#!` line. A script resolved through `PATH` is
+  granted, and then the kernel execs the interpreter named in its shebang,
+  which is not granted, so the run fails with `EACCES`. Grant the interpreter
+  yourself, or run `jail --auto -- python3 script.py`, where the command
+  really is the binary.
+- `--auto` resolves the command once and execs the path it resolved, so a
+  symlinked name (`/bin/sh` to `dash`) is followed here rather than at exec
+  time. `argv[0]` is still what the user typed.
+- `--deny` applies to `--auto` grants, which is coherent but easy to use
+  accidentally: `--auto --deny` on the libc it just granted is a command that
+  cannot start, and the kernel says so through the loader rather than through
+  us. The stderr report names what `--auto` asked for, so a `--deny` landing
+  on one of those paths makes the report an overstatement.
 
 ## Design
 
-One file, `jail.c`, 596 lines, 242 of them comment-only: 44% of the
+One file, `jail.c`, 770 lines, 310 of them comment-only: 43% of the
 non-blank lines, explaining why the kernel insists on something.
 
 ```
-parse args  ->  probe ABI  ->  mask rights to ABI  ->  create ruleset
+parse args  ->  (--auto: resolve CMD through PATH, ask ldd, grant those)
+            ->  probe ABI  ->  mask rights to ABI  ->  create ruleset
             ->  add one path_beneath rule per grant
             ->  prctl(PR_SET_NO_NEW_PRIVS)  ->  landlock_restrict_self
             ->  execvp
